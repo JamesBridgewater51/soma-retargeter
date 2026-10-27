@@ -244,6 +244,10 @@ def execute_group(jobs, settings):
             "evaluations": fitted["evaluations"]}
 
 
+def shard_batches(groups, shard_index, shard_count):
+    return [group for index, group in enumerate(groups) if index % shard_count == shard_index]
+
+
 def run(args):
     os.environ["STORAGE_ROOT"] = str(Path(args.storage_root).resolve())
     root = Path(args.storage_root)
@@ -264,7 +268,9 @@ def run(args):
                                   args.source_root or root / "datasets/bones-seed/raw/soma-uniform/full"))
     if len(rows) != args.expected_count:
         raise ValueError(f"Expected {args.expected_count} source entries, got {len(rows)}")
-    selected = [job for job in rows if job["index"] % args.shard_count == args.shard_index]
+    selected = rows if args.shard_mode == "batch" else [
+        job for job in rows if job["index"] % args.shard_count == args.shard_index
+    ]
     if args.motion:
         selected = [job for job in selected if job["stem"] in set(args.motion)]
         if {job["stem"] for job in selected} != set(args.motion):
@@ -272,6 +278,10 @@ def run(args):
     if args.limit:
         selected = selected[:args.limit]
     groups = motion_groups(selected, args)
+    if args.shard_mode == "batch":
+        groups = shard_batches(groups, args.shard_index, args.shard_count)
+        selected = [job for group in groups for job in group]
+    settings["shard_mode"] = args.shard_mode
     artifact_root = Path(settings["artifacts"])
     artifact_root.mkdir(parents=True, exist_ok=True)
     run_id = f"batched-shard-{args.shard_index}-of-{args.shard_count}-{uuid.uuid4().hex[:12]}"
@@ -333,6 +343,8 @@ def parse_args():
     parser.add_argument("--length-bucket-frames", type=int, default=256)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--shard-mode", choices=("sequence", "batch"), default="sequence",
+                        help="Assign whole global cohorts to workers instead of scattering each cohort")
     parser.add_argument("--snapshot-iterations", default="", help="Explicit native-search prefix budgets to retain for pilot quality comparisons")
     parser.add_argument("--retries", type=int, default=1)
     args = parser.parse_args()

@@ -520,13 +520,14 @@ class SomaRetargetingPipeline:
         print(f"[INFO] IK graph setup seconds: {self.graph_setup_seconds:.3f}")
 
         n_coords = joint_q.shape[1]
+        recorder = self._create_frame_recorder(joint_q, num_frames_to_remove)
         joint_q_frames_wp = [
             wp.empty(
                 (len(self.input_targets[env]) - num_frames_to_remove, n_coords),
                 dtype=wp.float32,
             )
             for env in range(num_envs)
-        ]
+        ] if recorder is None else []
 
         base_q_frames_wp = [wp.empty_like(frames) for frames in joint_q_frames_wp] if self.capture_base_motion else []
 
@@ -537,15 +538,20 @@ class SomaRetargetingPipeline:
                 pass_.execute(frame)
                 if pass_index == 0 and self.capture_base_motion and frame >= num_frames_to_remove:
                     # Raw base solve, before limb/plant processing and export clamp.
-                    for env in range(num_envs):
-                        if frame < len(self.input_targets[env]):
-                            wp.copy(base_q_frames_wp[env][frame - num_frames_to_remove], joint_q[env])
+                    if recorder is not None:
+                        recorder.record_base(frame, joint_q)
+                    else:
+                        for env in range(num_envs):
+                            if frame < len(self.input_targets[env]):
+                                wp.copy(base_q_frames_wp[env][frame - num_frames_to_remove], joint_q[env])
 
             if temporal is not None:
                 temporal.record(joint_q)
 
             # record to joint_q_frames_wp buffer
-            if frame >= num_frames_to_remove:
+            if recorder is not None:
+                recorder.record_final(frame, joint_q)
+            elif frame >= num_frames_to_remove:
                 for env in range(num_envs):
                     if frame > (len(self.input_targets[env])-1):
                         continue
@@ -553,9 +559,19 @@ class SomaRetargetingPipeline:
         self.frame_loop_seconds = time.perf_counter() - frame_loop_started
         print(f"[INFO] IK frame loop seconds: {self.frame_loop_seconds:.3f}")
         #clamp
+        if recorder is not None:
+            joint_q_frames_wp = recorder.final_frame_views()
         if temporal is None or not temporal.hard_velocity:
             for env in range(num_envs):
                 self.joint_limit_clamper.apply(joint_q_frames_wp[env])
+
+        if recorder is not None:
+            self.base_retargeted_motions = [
+                CSVAnimationBuffer.create_from_raw_data(frames, self.input_sample_rates[i])
+                for i, frames in enumerate(recorder.base_numpy_frames())
+            ]
+            return [CSVAnimationBuffer.create_from_raw_data(frames, self.input_sample_rates[i])
+                for i, frames in enumerate(recorder.final_numpy_frames())]
 
         self.base_retargeted_motions = [
             CSVAnimationBuffer.create_from_raw_data(frames.numpy().copy(), self.input_sample_rates[i])
@@ -563,6 +579,10 @@ class SomaRetargetingPipeline:
         ]
         return [CSVAnimationBuffer.create_from_raw_data(joint_q_frames_wp[i].numpy(), self.input_sample_rates[i])
             for i in range(num_envs)]
+
+    def _create_frame_recorder(self, joint_q, num_frames_to_remove):
+        """Allow batched callers to replace output storage without changing IK passes."""
+        return None
 
     def _build_model(self, num_envs: int):
         """Build a Newton model containing ``num_envs`` robot copies for batched simulation.
