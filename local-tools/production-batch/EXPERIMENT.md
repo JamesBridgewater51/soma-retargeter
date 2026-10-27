@@ -30,3 +30,12 @@ Clock starts 2026-10-27 14:18 UTC; target deadline 23:18 UTC. This is a target, 
 - Coverage is checked against the complete input manifest with duplicate/missing/error counts.
 - Failures are explicit and isolated; unsuccessful runs are not completion.
 - Progress and throughput-derived ETA are persisted and surfaced.
+
+## Verified launch constraints
+
+- `clusterx --include` matches Kubernetes hostnames, not management node names. The authorized fragmented nodes `ecp-tcluster-a844` and `ecp-tcluster-ab45` correspond to `host-10-140-62-36` and `host-10-140-108-112`. The corrected probe scheduled on the first physical node in eight seconds; the management-name selector remained pending.
+- The configured launcher already supplies the shared `/data` mount. Adding the same mount explicitly produces a rejected duplicate-mount request; inspect the composed payload.
+- SSP job names have a 32-character maximum.
+- The shared Python executable resolves into persistent storage. Launchers still explicitly prepend and verify their isolated source repository because the environment's editable installation otherwise selects the old repository.
+- Eight real filesystem/configuration tests pass on the shared runtime. Batched optimization also passes native B1/B2 accepted/rejected-update parity and mixed 1/2/3-frame full-post/export checks on CPU; GPU end-to-end throughput remains a separate launch gate.
+- The eleven disabled-temporal control CSVs reproduce all numerical values of the existing frozen optimized comparison outputs exactly. This checks backward compatibility, not temporal improvement.
