@@ -5,8 +5,11 @@ import os
 import newton
 
 import pathlib
+import sys
 import time
 import warp as wp
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from soma_retargeter.io import utils
 from soma_retargeter.robotics import robot_registry

@@ -33,12 +33,16 @@ def gpu_gib():
 def main():
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--profile-path", type=Path, required=True)
+    parser.add_argument("--entrypoint", type=Path, default=Path(__file__).with_name("run_batched.py"))
     parser.add_argument("--rss-limit-gib", type=float, default=56.0)
     parser.add_argument("--gpu-limit-gib", type=float, default=72.0)
     args, runner_args = parser.parse_known_args()
     if runner_args and runner_args[0] == "--":
         runner_args = runner_args[1:]
-    command = [sys.executable, "-I", str(Path(__file__).with_name("run_batched.py")), *runner_args]
+    entrypoint = args.entrypoint.resolve()
+    if entrypoint.parent != Path(__file__).resolve().parent:
+        raise ValueError("Profiling entrypoint must be a trusted sibling tool")
+    command = [sys.executable, "-I", str(entrypoint), *runner_args]
     started = time.monotonic()
     peak_rss = peak_gpu = 0.0
     stopped_for_memory = False
