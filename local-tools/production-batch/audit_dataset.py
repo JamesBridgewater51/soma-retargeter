@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import csv
+from functools import partial
 import math
+import os
 from pathlib import Path
 import sys
 import time
@@ -149,13 +152,40 @@ def _unexpected_products(stems, settings):
         extras.extend(str(path) for path in directory.glob(pattern) if path.stem not in stems)
     weights = Path(settings['weights'])
     if weights.is_dir():
-        extras.extend(str(path) for path in weights.iterdir()
-                      if path.is_dir() and not path.name.startswith('.') and path.name not in stems)
+        with os.scandir(weights) as entries:
+            extras.extend(entry.path for entry in entries
+                          if entry.name not in stems and not entry.name.startswith('.') and entry.is_dir())
     return sorted(extras)
 
 
-def audit_dataset(manifest, source_root, settings, expected_count=142220):
+def _audit_job(job, settings):
+    source_frames = 0
+    try:
+        metadata = _check_source(job)
+        source_frames = metadata['frames']
+        return source_frames, _audit_product(job, settings, metadata), None
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        failure = {'stem': job['stem'], 'category': getattr(exc, 'category', 'invalid_metadata_or_weights'),
+                   'message': str(exc)}
+        return source_frames, None, failure
+
+
+def _ordered_results(rows, settings, workers):
+    inspect = partial(_audit_job, settings=settings)
+    if workers == 1:
+        yield from map(inspect, rows)
+        return
+    # Bound queued futures while retaining input-order aggregation on Python
+    # versions whose Executor.map does not yet support a buffersize argument.
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='dataset-audit') as executor:
+        for start in range(0, len(rows), workers * 8):
+            yield from executor.map(inspect, rows[start:start + workers * 8])
+
+
+def audit_dataset(manifest, source_root, settings, expected_count=142220, *, workers=1):
     """Return COMPLETE only for full, hash-bound coverage; never mutate products."""
+    if workers < 1:
+        raise ValueError('Audit workers must be positive')
     started = time.monotonic()
     manifest_signature = _file_signature(Path(manifest)) if Path(manifest).is_file() else None
     rows, failures = _manifest_rows(manifest, source_root)
@@ -167,18 +197,18 @@ def audit_dataset(manifest, source_root, settings, expected_count=142220):
     if len(rows) != expected_count:
         failures.append({'category': 'input_count', 'message': f'Expected {expected_count} inputs, found {len(rows)}'})
     products, expected_frames, header_reference = [], 0, None
-    for job in rows:
-        try:
-            metadata = _check_source(job)
-            expected_frames += metadata['frames']
-            product = _audit_product(job, settings, metadata)
-            if header_reference is None:
-                header_reference = product['headers']
-            _require(product.pop('headers') == header_reference, 'csv_headers', 'Dataset contains inconsistent joint headers')
-            products.append(product)
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            failures.append({'stem': job['stem'], 'category': getattr(exc, 'category', 'invalid_metadata_or_weights'),
-                             'message': str(exc)})
+    for source_frames, product, failure in _ordered_results(rows, settings, workers):
+        expected_frames += source_frames
+        if failure is not None:
+            failures.append(failure)
+            continue
+        if header_reference is None:
+            header_reference = product['headers']
+        if product.pop('headers') != header_reference:
+            failures.append({'stem': product['stem'], 'category': 'csv_headers',
+                             'message': 'Dataset contains inconsistent joint headers'})
+            continue
+        products.append(product)
     extras = _unexpected_products({job['stem'] for job in rows}, settings)
     if extras:
         failures.append({'category': 'unexpected_products', 'paths': extras})
@@ -194,6 +224,7 @@ def audit_dataset(manifest, source_root, settings, expected_count=142220):
             'validated_frames': sum(product['frames'] for product in products), 'headers': header_reference,
             'failure_categories': dict(Counter(failure['category'] for failure in failures)),
             'failures': failures, 'products': products, 'elapsed_seconds': time.monotonic() - started,
+            'audit_workers': workers,
             'validation': {'csv_sha256_recomputed': True, 'weights_sha256_recomputed': True,
                            'finite_shape': 'Native export validation bound to receipt CSV SHA256; rows not reparsed',
                            'source_sha256': 'Bound to extraction manifest and native content keys; source size/header checked'},
@@ -215,13 +246,14 @@ def main(argv=None):
     parser.add_argument('--source-root', type=Path, required=True)
     parser.add_argument('--settings', type=Path, required=True, help='Captured selected production settings JSON')
     parser.add_argument('--expected-count', type=int, default=142220)
+    parser.add_argument('--workers', type=int, default=1, help='Read-only per-clip audit threads; results retain manifest order')
     parser.add_argument('--audit-output', type=Path, required=True)
     args = parser.parse_args(argv)
-    if args.expected_count < 1:
-        parser.error('--expected-count must be positive')
+    if args.expected_count < 1 or args.workers < 1:
+        parser.error('--expected-count and --workers must be positive')
     settings = batch.load_json(args.settings)
     _check_report_destination(args, settings)
-    report = audit_dataset(args.manifest, args.source_root, settings, args.expected_count)
+    report = audit_dataset(args.manifest, args.source_root, settings, args.expected_count, workers=args.workers)
     report['selected_settings_file'] = str(args.settings.resolve())
     report['selected_settings_sha256'] = batch.digest(args.settings)
     batch.atomic_json(args.audit_output, report)

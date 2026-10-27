@@ -75,8 +75,8 @@ class DatasetFixture:
         for job in self.jobs:
             self.publish(job)
 
-    def run(self):
-        return audit.audit_dataset(self.manifest, self.sources, self.settings, expected_count=2)
+    def run(self, workers=1):
+        return audit.audit_dataset(self.manifest, self.sources, self.settings, expected_count=2, workers=workers)
 
 
 class DatasetAuditTests(unittest.TestCase):
@@ -245,6 +245,32 @@ class DatasetAuditTests(unittest.TestCase):
         self.assertIsNone(report['input_manifest_sha256'])
         self.assertIn('input_manifest', report['failure_categories'])
 
+    def test_parallel_results_equal_serial_for_valid_and_corrupted_hard_receipts(self):
+        self.fixture.enable_hard_velocity()
+        for corrupted in (False, True):
+            with self.subTest(corrupted=corrupted):
+                if corrupted:
+                    paths = self.fixture.paths(self.fixture.jobs[0])
+                    with paths['csv'].open('a') as stream:
+                        stream.write('nan,0\n')
+                    paths = self.fixture.paths(self.fixture.jobs[1])
+                    done = batch.load_json(paths['done'])
+                    done['validation']['velocity']['violation_count'] = 1
+                    batch.atomic_json(paths['done'], done)
+                serial = self.fixture.run()
+                for key in ('elapsed_seconds', 'audit_workers'):
+                    serial.pop(key)
+                for workers in (2, 8, 16):
+                    parallel = self.fixture.run(workers=workers)
+                    for key in ('elapsed_seconds', 'audit_workers'):
+                        parallel.pop(key)
+                    self.assertEqual(parallel, serial)
+
+    def test_invalid_worker_count_is_rejected_before_audit(self):
+        for workers in (0, -1):
+            with self.subTest(workers=workers), self.assertRaisesRegex(ValueError, 'workers must be positive'):
+                self.fixture.run(workers=workers)
+
     def test_cli_writes_atomic_incomplete_report_and_returns_nonzero(self):
         paths = self.fixture.paths(self.fixture.jobs[0])
         paths['done'].unlink()
@@ -252,7 +278,7 @@ class DatasetAuditTests(unittest.TestCase):
         batch.atomic_json(settings_path, self.fixture.settings)
         report_path = Path(self.fixture.settings['artifacts']) / 'audit.json'
         exit_code = audit.main(['--manifest', str(self.fixture.manifest), '--source-root', str(self.fixture.sources),
-                                '--settings', str(settings_path), '--expected-count', '2',
+                                '--settings', str(settings_path), '--expected-count', '2', '--workers', '8',
                                 '--audit-output', str(report_path)])
         self.assertEqual(exit_code, 1)
         self.assertEqual(batch.load_json(report_path)['status'], 'INCOMPLETE')
