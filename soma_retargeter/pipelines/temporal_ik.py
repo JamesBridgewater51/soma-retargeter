@@ -39,6 +39,32 @@ def _accept_feasible(q: wp.array2d(dtype=float), previous: wp.array2d(dtype=floa
         q[env, c] = previous[env, c]
 
 
+@wp.kernel
+def _reject_projected_damping(cost: wp.array(dtype=float), previous_cost: wp.array(dtype=float),
+                               previous_lambda: wp.array(dtype=float), factor: float,
+                               minimum: float, maximum: float, damping: wp.array(dtype=float)):
+    env = wp.tid()
+    if not wp.isfinite(cost[env]) or cost[env] > previous_cost[env]:
+        damping[env] = wp.clamp(previous_lambda[env] * factor, minimum, maximum)
+
+
+def _temporal_lm_optimizer(solver, q):
+    optimizer = solver._impl
+    if solver.optimizer_type != ik.IKOptimizer.LM or not isinstance(optimizer, ik.IKOptimizerLM):
+        raise ValueError('Hard temporal IK requires the native Newton LM backend')
+    if solver.sampler != ik.IKSampler.NONE or solver.n_seeds != 1 or solver.n_expanded != q.shape[0]:
+        raise ValueError('Hard temporal IK requires identity single-seed batching')
+    required = ('_step', 'lambda_values', 'lambda_initial', 'lambda_factor', 'lambda_min', 'lambda_max')
+    if not all(hasattr(optimizer, name) for name in required) or not callable(optimizer._step):
+        raise RuntimeError('Installed Newton LM private iteration contract changed')
+    if optimizer.lambda_values.shape != (q.shape[0],) or optimizer.lambda_values.dtype != wp.float32:
+        raise RuntimeError('Installed Newton LM damping buffer contract changed')
+    damping = (optimizer.lambda_initial, optimizer.lambda_factor, optimizer.lambda_min, optimizer.lambda_max)
+    if not all(np.isfinite(damping)) or not (0 < damping[2] <= damping[0] <= damping[3] and damping[1] > 1):
+        raise ValueError('Hard temporal IK requires finite, valid adaptive LM damping parameters')
+    return optimizer
+
+
 class IKTemporalObjective(ik.IKObjective):
     """Scalar-joint pose or constant-velocity prediction residual, in radians/metres.
 
@@ -266,6 +292,7 @@ class TemporalIK:
         self.upper = wp.empty(shape, dtype=float, device=model.device)
         self.incumbent = wp.empty(initial.shape, dtype=float, device=model.device)
         self.incumbent_cost = wp.empty(num_envs, dtype=float, device=model.device)
+        self._lambda_before = wp.empty(num_envs, dtype=float, device=model.device)
         self.device = model.device
 
     def reset_history(self):
@@ -303,15 +330,23 @@ class TemporalIK:
                   inputs=[q, self.coords_wp, self.lower, self.upper], device=self.device)
 
     def solve(self, solver, q, iterations):
-        # Project before measuring the incumbent, then only accept projected
-        # proposals that reduce the complete IK objective. No package patching.
+        optimizer = _temporal_lm_optimizer(solver, q)
         self.project(q)
+        # Both public Newton step layers reset damping. Initialize once per
+        # solve, then retain per-environment adaptation between proposals.
+        optimizer.lambda_values.fill_(optimizer.lambda_initial)
         for _ in range(iterations):
             wp.copy(self.incumbent, q)
             wp.copy(self.incumbent_cost, solver.compute_costs(q))
-            solver.step(q, q, iterations=1)
+            wp.copy(self._lambda_before, optimizer.lambda_values)
+            # Refresh residuals after our external projection or restoration.
+            optimizer._step(q, iteration=0)
             self.project(q)
             costs = solver.compute_costs(q)
+            wp.launch(_reject_projected_damping, q.shape[0],
+                      inputs=[costs, self.incumbent_cost, self._lambda_before,
+                              optimizer.lambda_factor, optimizer.lambda_min, optimizer.lambda_max,
+                              optimizer.lambda_values], device=self.device)
             wp.launch(_accept_feasible, q.shape,
                       inputs=[q, self.incumbent, costs, self.incumbent_cost], device=self.device)
 

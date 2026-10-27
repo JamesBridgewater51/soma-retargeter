@@ -77,10 +77,20 @@ def completed_receipt(job, settings):
     return None
 
 
-def load_animations(jobs):
-    from soma_retargeter.io.bvh import load_bvh
-    skeleton, first = load_bvh(jobs[0]["source"])
-    animations = [first] + [load_bvh(job["source"], skeleton)[1] for job in jobs[1:]]
+def load_animations(jobs, settings, prepared=None):
+    if settings.get("fast_bvh", False):
+        from fast_bvh import load_bvh
+    else:
+        from soma_retargeter.io.bvh import load_bvh
+    if prepared is None:
+        skeleton, first = load_bvh(jobs[0]["source"])
+        cached = {jobs[0]["stem"]: first}
+    else:
+        skeleton, cached = prepared
+    for job in jobs:
+        if job["stem"] not in cached:
+            cached[job["stem"]] = load_bvh(job["source"], skeleton)[1]
+    animations = [cached[job["stem"]] for job in jobs]
     for job, animation in zip(jobs, animations, strict=True):
         if not math.isclose(float(animation.sample_rate), job["fps"], rel_tol=1e-8):
             raise ValueError("Native BVH sample-rate rounding contract changed")
@@ -90,15 +100,20 @@ def load_animations(jobs):
 def fit_missing(jobs, settings):
     from app.tools.ik_weight_optimizer import OptimizerConfigWorkspace
     from batched_optimizer import IndependentBatchOptimizer
+    gate_started = time.monotonic()
     missing = [job for job in jobs if not optimizer_receipt(job, settings)]
     if not missing:
-        return []
-    skeleton, animations = load_animations(missing)
+        return {"evaluations": [], "timings": {"resume_scan_seconds": time.monotonic() - gate_started}, "prepared": None}
     started = time.monotonic()
+    skeleton, animations = load_animations(missing, settings)
+    print(json.dumps({"event": "BVH_LOAD_PROFILE", "clips": len(missing),
+                      "seconds": time.monotonic() - started}), flush=True)
     workspace = OptimizerConfigWorkspace("soma", "agibot_x2ultra", Path(settings["weights"]))
     optimizer = IndependentBatchOptimizer(skeleton, animations, [job["stem"] for job in missing], settings, workspace)
+    search_started = time.monotonic()
     configs = optimizer.run()
-    elapsed = time.monotonic() - started
+    searched = time.monotonic()
+    elapsed = searched - started
     batch.verify_protected_files(settings)
     for job, config, summary in zip(missing, configs, optimizer.summaries(), strict=True):
         paths = product_paths(job, settings)
@@ -110,7 +125,14 @@ def fit_missing(jobs, settings):
             "source_sha256": job["sha256"], "source": job["source"], "batch_wall_seconds": elapsed,
             "batch_clips": len(missing), "outer_iterations": settings["optimizer"]["outer_iterations"],
             "engine": settings["engine"]})
-    return optimizer.evaluation_timings
+    timings = {"resume_scan_seconds": started - gate_started,
+               "bvh_and_optimizer_setup_seconds": search_started - started,
+               "search_seconds": searched - search_started,
+               "weights_publish_seconds": time.monotonic() - searched,
+               "optimizer_setup": optimizer.setup_timings}
+    print(json.dumps({"event": "FIT_PROFILE", **timings}), flush=True)
+    return {"evaluations": optimizer.evaluation_timings, "timings": timings,
+            "prepared": (skeleton, {job["stem"]: animation for job, animation in zip(missing, animations, strict=True)})}
 
 
 def export_buffer(job, settings, buffer, headers):
@@ -139,12 +161,13 @@ def export_buffer(job, settings, buffer, headers):
         "source_fps": job["source_fps"], "source_frame_time": job["source_frame_time"], "engine": settings["engine"]})
 
 
-def convert_missing(jobs, settings):
+def convert_missing(jobs, settings, prepared=None):
     import newton
     import warp as wp
     from batched_optimizer import PerSequencePipeline
     from soma_retargeter.utils.newton_utils import get_filtered_joint_names
     from soma_retargeter.utils.space_conversion_utils import SpaceConverter, FacingDirectionType
+    gate_started = time.monotonic()
     missing = [job for job in jobs if not completed_receipt(job, settings)]
     if not missing:
         return 0.0
@@ -156,12 +179,16 @@ def convert_missing(jobs, settings):
     for flag in ("enable_post_processing", "enable_contact_processing"):
         if full_config.get(flag, True) is not True:
             raise ValueError(f"Full conversion requires {flag}=true")
-    skeleton, animations = load_animations(missing)
+    load_started = time.monotonic()
+    skeleton, animations = load_animations(missing, settings, prepared)
+    loaded = time.monotonic()
     pipeline = PerSequencePipeline(skeleton, full_config, configs)
     transform = SpaceConverter(FacingDirectionType.MAYA).transform(wp.transform_identity())
     started = time.monotonic()
     pipeline.add_input_motions(animations, [transform] * len(animations), scale_animation=True)
+    prepared = time.monotonic()
     buffers = pipeline.execute()
+    executed = time.monotonic()
     headers = batch.ROOT_HEADER + get_filtered_joint_names(pipeline.robot_builder, [newton.JointType.REVOLUTE])
     if len(headers) != 38 or len(set(headers)) != 38:
         raise ValueError("X2 Ultra export requires 38 unique CSV columns")
@@ -170,7 +197,11 @@ def convert_missing(jobs, settings):
     batch.verify_protected_files(settings)
     for job, buffer in zip(missing, buffers, strict=True):
         export_buffer(job, settings, buffer, headers)
-    return time.monotonic() - started
+    finished = time.monotonic()
+    print(json.dumps({"event": "CONVERSION_PROFILE", "receipt_config_seconds": load_started - gate_started,
+                      "bvh_load_seconds": loaded - load_started, "pipeline_prepare_seconds": prepared - loaded,
+                      "execute_seconds": executed - prepared, "publish_seconds": finished - executed}), flush=True)
+    return finished - started
 
 
 def execute_group(jobs, settings):
@@ -188,11 +219,13 @@ def execute_group(jobs, settings):
         resumed = sum(bool(completed_receipt(job, settings)) for job in jobs)
         print(json.dumps({"event": "BATCH_START", "clips": len(jobs), "resumed": resumed,
                           "frames": sum(job["frames"] for job in jobs)}), flush=True)
-        evaluations = fit_missing(jobs, settings)
-        conversion_seconds = convert_missing(jobs, settings)
+        gated = time.monotonic()
+        fitted = fit_missing(jobs, settings)
+        conversion_seconds = convert_missing(jobs, settings, fitted["prepared"])
     return {"clips": len(jobs), "frames": sum(job["frames"] for job in jobs), "resumed": resumed,
             "wall_seconds": time.monotonic() - started, "conversion_seconds": conversion_seconds,
-            "evaluations": evaluations}
+            "gate_seconds": gated - started, "fit_profile": fitted["timings"],
+            "evaluations": fitted["evaluations"]}
 
 
 def run(args):
@@ -201,6 +234,12 @@ def run(args):
     args.provenance_file = []
     settings = batch.prepare_settings(args)
     settings["engine"] = "native-independent-batched"
+    settings["reuse_geometry"] = args.reuse_geometry
+    settings["fast_bvh"] = args.fast_bvh
+    for key, override in (("output", args.output_root), ("weights", args.weights_root),
+                          ("logs", args.log_root), ("artifacts", args.artifact_root)):
+        if override:
+            settings[key] = str(Path(override).resolve())
     rows = list(batch.source_rows(args.manifest or root / "datasets/bones-seed/metadata/soma-uniform-full/extracted-files.jsonl",
                                   args.source_root or root / "datasets/bones-seed/raw/soma-uniform/full"))
     if len(rows) != args.expected_count:
@@ -255,6 +294,10 @@ def parse_args():
     parser.add_argument("--storage-root", default=os.environ.get("STORAGE_ROOT", "/data/liuminghao"))
     parser.add_argument("--optimizer-config", type=Path, required=True)
     parser.add_argument("--conversion-overrides", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path)
+    parser.add_argument("--weights-root", type=Path)
+    parser.add_argument("--log-root", type=Path)
+    parser.add_argument("--artifact-root", type=Path)
     parser.add_argument("--manifest")
     parser.add_argument("--source-root")
     parser.add_argument("--expected-count", type=int, default=142220)
@@ -262,6 +305,9 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--fast-bvh", action="store_true", help="Use bit-exact vectorized native BVH decoding")
+    parser.add_argument("--reuse-geometry", action="store_true",
+                        help="Reuse immutable post-OFF model geometry; keep all per-probe solver/history state fresh")
     parser.add_argument("--length-bucket-frames", type=int, default=256)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)

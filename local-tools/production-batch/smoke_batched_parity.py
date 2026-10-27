@@ -83,6 +83,38 @@ def fullpost_parity(skeleton, animations, configs, settings):
             "clips": len(combined_buffers), "frames": [buffer.num_frames for buffer in combined_buffers]}
 
 
+def geometry_reset_parity(skeleton, animations, settings, workspace):
+    import numpy as np
+    from batched_optimizer import IndependentBatchOptimizer
+
+    class RecordingOptimizer(IndependentBatchOptimizer):
+        def score(self, index, poses, coordinates):
+            if not hasattr(self, 'raw_q'):
+                self.raw_q = {}
+            self.raw_q[index] = np.array(coordinates, copy=True)
+            return super().score(index, poses, coordinates)
+
+    cached_settings = {**settings, "reuse_geometry": True}
+    fresh_settings = {**settings, "reuse_geometry": False}
+    names = ["reset-a.bvh", "reset-b.bvh"]
+    cached = RecordingOptimizer(skeleton, animations, names, cached_settings, workspace)
+    fresh = RecordingOptimizer(skeleton, animations, names, fresh_settings, workspace)
+    cached.initialize()
+    fresh.initialize()
+    baseline = {index: q.copy() for index, q in cached.raw_q.items()}
+    for index in baseline:
+        np.testing.assert_allclose(baseline[index], fresh.raw_q[index], rtol=1e-5, atol=1e-6)
+    cached.evaluate([0, 1], [cached.propose(index, 1.0)[0] for index in (0, 1)])
+    if not any(not np.allclose(baseline[index], cached.raw_q[index], rtol=1e-7, atol=1e-8) for index in baseline):
+        raise AssertionError("Reset smoke did not exercise a changed candidate trajectory")
+    cached.evaluate([1, 0], [cached.states[1].params, cached.states[0].params])
+    for index in baseline:
+        np.testing.assert_allclose(cached.raw_q[index], baseline[index], rtol=1e-5, atol=1e-6)
+    cached.evaluate([0], [cached.states[0].params])
+    np.testing.assert_allclose(cached.raw_q[0], baseline[0], rtol=1e-5, atol=1e-6)
+    return {"fresh_vs_cached_raw_q": "PASS", "changed_probe_then_reordered_repeat": "PASS", "batch_sizes": [1, 2]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--motion", type=Path, required=True)
@@ -92,10 +124,12 @@ def main():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--scenario", choices=("native", "force-accept"), default="native")
     parser.add_argument("--fullpost", action="store_true", help="Also compare native full-post trajectories and validate CSV exports")
+    parser.add_argument("--reuse-geometry", action="store_true", help="Also verify immutable geometry reuse and reordered raw-q reset")
     args = parser.parse_args()
     args.provenance_file = []
     os.environ["STORAGE_ROOT"] = args.storage_root
     settings = batch.prepare_settings(args)
+    settings["reuse_geometry"] = args.reuse_geometry
     import warp as wp
     from app.tools import ik_weight_optimizer as native
     from soma_retargeter.io.bvh import load_bvh
@@ -111,6 +145,7 @@ def main():
     settings["optimizer"] = config
     evidence = []
     fullpost = None
+    reset = None
     with tempfile.TemporaryDirectory(prefix="batched-parity-") as directory:
         root = Path(directory)
         paths = [root / "clip-a.bvh", root / "clip-b.bvh"]
@@ -138,13 +173,15 @@ def main():
                         raise AssertionError("Forced acceptance smoke did not exercise two accepted updates")
                     if args.fullpost:
                         fullpost = fullpost_parity(skeleton, animations, candidates, settings)
+                    if args.reuse_geometry:
+                        reset = geometry_reset_parity(skeleton, animations, settings, workspace)
             except Exception:
                 transcript.seek(0)
                 print(transcript.read()[-32768:], flush=True)
                 raise
     print(json.dumps({"parity": "PASS", "device": args.device, "frames_per_clip": 8,
                       "outer_iterations": 2, "max_backtracks": 1, "scenario": args.scenario,
-                      "clips": evidence, "fullpost": fullpost}), flush=True)
+                      "clips": evidence, "fullpost": fullpost, "geometry_reset": reset}), flush=True)
 
 
 if __name__ == "__main__":

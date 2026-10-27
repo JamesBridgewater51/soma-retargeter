@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, field
 import time
 
@@ -20,6 +21,18 @@ class PerSequencePipeline(SomaRetargetingPipeline):
     def __init__(self, skeleton, config, per_sequence_configs):
         self.per_sequence_configs = per_sequence_configs
         super().__init__(skeleton, "soma", "agibot_x2ultra", retarget_config=copy.deepcopy(config))
+
+    @classmethod
+    def from_base_template(cls, template, per_sequence_configs):
+        """Share static geometry only; native execute still builds every solver/state fresh."""
+        if template.post_processing_enabled:
+            raise ValueError("Prepared geometry reuse is restricted to post-OFF optimizer evaluations")
+        pipeline = cls.__new__(cls)
+        pipeline.__dict__ = template.__dict__.copy()
+        pipeline.per_sequence_configs = per_sequence_configs
+        pipeline.temporal_ik_config = copy.deepcopy(template.temporal_ik_config)
+        pipeline.clear()
+        return pipeline
 
     def _create_ik_objectives(self, num_envs, model, state):
         positions, rotations, limits, smooth = super()._create_ik_objectives(num_envs, model, state)
@@ -64,6 +77,7 @@ class IndependentBatchOptimizer:
     def __init__(self, skeleton, animations, names, settings, workspace):
         self.skeleton, self.animations, self.names = skeleton, animations, names
         self.config = copy.deepcopy(settings["optimizer"])
+        self.reuse_geometry = bool(settings.get("reuse_geometry", False))
         self.workspace = workspace
         self.ik = native.IkWeightUpdateConfig.from_config(self.config)
         self.line_search = native.LineSearchConfig.from_config(self.config)
@@ -71,15 +85,24 @@ class IndependentBatchOptimizer:
         self.symmetry = workspace.build_symmetry_pairs() if self.config.get("is_target_symmetric", True) else []
         identity = native.OptimizerParameters.identity(len(workspace.effector_names))
         baseline = self.retargeter(identity)
+        started = time.monotonic()
         self.template = SomaRetargetingPipeline(skeleton, "soma", workspace.target_type, retarget_config=baseline)
+        constructed = time.monotonic()
         transform = SpaceConverter(FacingDirectionType.MAYA).transform(wp.transform_identity())
         self.template.add_input_motions(animations, [transform] * len(animations), scale_animation=True)
+        targets_ready = time.monotonic()
         self.targets = self.template.input_targets
         self.sample_rates = self.template.input_sample_rates
         self.remove = self.template.num_initialization_frames + self.template.num_stabilization_frames
         self.evaluator = native.BodyEvaluator(self.template, fk_frame_batch_size=int(self.config.get("fk_frame_batch_size", 100)))
+        evaluator_ready = time.monotonic()
         self.states = [ClipState(copy.deepcopy(identity), self.error_model(targets)) for targets in self.targets]
+        self.setup_timings = {"template_construct_seconds": constructed - started,
+                              "scaled_target_seconds": targets_ready - constructed,
+                              "body_evaluator_construct_seconds": evaluator_ready - targets_ready,
+                              "per_clip_error_model_seconds": time.monotonic() - evaluator_ready}
         self.evaluation_timings = []
+        print(json.dumps({"event": "SETUP_PROFILE", **self.setup_timings}), flush=True)
 
     def retargeter(self, params):
         return native._build_retargeter_config(self.workspace, params, self.config.get("retargeter_overrides"))
@@ -96,17 +119,31 @@ class IndependentBatchOptimizer:
     def evaluate(self, indices, parameters):
         started = time.monotonic()
         configs = [self.retargeter(params) for params in parameters]
-        pipeline = PerSequencePipeline(self.skeleton, configs[0], configs)
+        pipeline = (PerSequencePipeline.from_base_template(self.template, configs) if self.reuse_geometry
+                    else PerSequencePipeline(self.skeleton, configs[0], configs))
         pipeline.input_targets = [self.targets[index] for index in indices]
         pipeline.input_sample_rates = [self.sample_rates[index] for index in indices]
         pipeline.max_frames = max(len(targets) for targets in pipeline.input_targets)
+        constructed = time.monotonic()
         buffers = pipeline.execute()
+        executed = time.monotonic()
         solved = native._buffers_to_arrays(buffers)
+        transferred = time.monotonic()
         poses = self.evaluator.evaluate(solved)
+        evaluated = time.monotonic()
         outcomes = [self.score(index, pose, coordinates)
                     for index, pose, coordinates in zip(indices, poses, solved, strict=True)]
+        scored = time.monotonic()
         self.evaluation_timings.append({"clips": len(indices), "frames": sum(len(q) for q in solved),
-                                        "seconds": time.monotonic() - started})
+                                        "seconds": scored - started,
+                                        "construct_seconds": constructed - started,
+                                        "execute_seconds": executed - constructed,
+                                        "buffer_seconds": transferred - executed,
+                                        "fk_seconds": evaluated - transferred,
+                                        "score_seconds": scored - evaluated,
+                                        "graph_setup_seconds": getattr(pipeline, "graph_setup_seconds", None),
+                                        "frame_loop_seconds": getattr(pipeline, "frame_loop_seconds", None)})
+        print(json.dumps({"event": "EVALUATION_PROFILE", **self.evaluation_timings[-1]}), flush=True)
         return outcomes
 
     def score(self, index, poses, coordinates):

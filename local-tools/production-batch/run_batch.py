@@ -42,7 +42,9 @@ def key_for(value):
 def optimization_key(job, settings):
     return key_for({"schema": 1, "source_sha256": job["sha256"],
                     "optimizer": settings["optimizer"], "provenance": settings["provenance"],
-                    "engine": settings.get("engine", "native-singleton")})
+                    "engine": settings.get("engine", "native-singleton"),
+                    "reuse_geometry": settings.get("reuse_geometry", False),
+                    "fast_bvh": settings.get("fast_bvh", False)})
 
 
 def conversion_key_for(optimized, settings):
