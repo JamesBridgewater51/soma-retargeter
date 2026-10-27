@@ -1,3 +1,4 @@
+import copy
 import csv
 import hashlib
 import importlib.util
@@ -53,6 +54,8 @@ class CSVVelocityTests(unittest.TestCase):
             self.assertEqual(report["velocity_limits_sha256"], independent_fingerprint({"hip": 2.0, "knee": 4.0}))
             self.assertEqual(report["effective_limits_sha256"], independent_fingerprint({"hip": 1.0, "knee": 2.0}))
             json.dumps(report, allow_nan=False)
+            path.unlink()
+            VELOCITY.validate_attestation(report, ["knee", "hip"], 3, plan)
 
     def test_zero_one_two_three_frame_boundaries_and_per_clip_fps(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -72,6 +75,12 @@ class CSVVelocityTests(unittest.TestCase):
                     self.assertEqual(report["max_ratio"], 0)
                     self.assertEqual(report["worst_frame_interval"], [0, 1] if frames > 1 else None)
                     self.assertEqual(report["native_fps"], fps)
+                    VELOCITY.validate_attestation(report, ["hip"], frames, {**contract, "native_fps": fps})
+                    if frames == 1:
+                        for field in ["worst_joint", "worst_frame_interval"]:
+                            corrupted = {key: value for key, value in report.items() if key != field}
+                            with self.assertRaises(ValueError):
+                                VELOCITY.validate_attestation(corrupted, ["hip"], frames, {**contract, "native_fps": fps})
 
     def test_relative_rounding_tolerance_accepts_small_excess_but_not_real_violation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -167,6 +176,57 @@ class CSVVelocityTests(unittest.TestCase):
             self.assertAlmostEqual(report["max_ratio"], 0.5)
             self.assertEqual(report["velocity_scale"], 1)
             self.assertEqual(report["velocity_limits_sha256"], independent_fingerprint({"hip": 1.0}))
+
+    def test_attestation_corruptions_and_missing_fields_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = {**VELOCITY.load_velocity_contract(self.urdf(directory, {"hip": 1})), "native_fps": 120}
+            accumulator = VELOCITY.VelocityAccumulator(["hip"], plan)
+            accumulator.observe_angles([0])
+            accumulator.observe_angles([math.degrees(0.5 / 120)])
+            report = accumulator.finish()
+            changes = [("schema", 2), ("schema", True), ("enabled", False), ("enabled", 1),
+                       ("status", "failed"), ("frames", 3), ("frames", True), ("joint_count", 2),
+                       ("checked_pairs", 0), ("violation_count", 1), ("exceedance_frames", 1),
+                       ("native_fps", 60), ("native_fps", "120"), ("angle_units", "rad"),
+                       ("limit_units", "deg/s"), ("limit_basis", "unverified"),
+                       ("relative_tolerance", 1e-3), ("velocity_scale", 0.5), ("velocity_scale", True),
+                       ("urdf_sha256", "0" * 64), ("ordered_joint_names_sha256", "0" * 64),
+                       ("velocity_limits_sha256", "0" * 64), ("effective_limits_sha256", "0" * 64),
+                       ("fingerprint_schema", "unknown"), ("worst_joint", "unknown")]
+            changes += [("max_ratio", value) for value in [1.001, -0.1, float("nan"), float("inf"), True, "0"]]
+            changes += [("worst_frame_interval", value) for value in
+                        [[0, 0], [-1, 0], [0, 2], [1, 2], [0, True], (0, 1), None]]
+            for field, value in changes:
+                with self.subTest(field=field, value=value):
+                    corrupted = copy.deepcopy(report)
+                    corrupted[field] = value
+                    with self.assertRaises(ValueError):
+                        VELOCITY.validate_attestation(corrupted, ["hip"], 2, plan)
+            for field in report:
+                with self.subTest(missing=field):
+                    corrupted = copy.deepcopy(report)
+                    del corrupted[field]
+                    with self.assertRaises(ValueError):
+                        VELOCITY.validate_attestation(corrupted, ["hip"], 2, plan)
+
+    def test_attestation_is_bound_to_authoritative_names_limits_scale_fps_and_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plan = {**VELOCITY.load_velocity_contract(self.urdf(directory, {"hip": 1, "knee": 2})), "native_fps": 120}
+            accumulator = VELOCITY.VelocityAccumulator(["hip", "knee"], plan)
+            accumulator.observe_angles([0, 0])
+            accumulator.observe_angles([0, 0])
+            report = accumulator.finish()
+            cases = [(["knee", "hip"], 2, plan), (["hip", "knee"], 3, plan),
+                     (["hip", "knee"], True, plan), (["hip", "knee"], 0, plan)]
+            cases += [(["hip", "knee"], 2, {**plan, **mutation}) for mutation in
+                      [{"native_fps": 60}, {"velocity_scale": 0.5}, {"urdf_sha256": "0" * 64},
+                       {"limits_rad_s": {"hip": 2, "knee": 1}}]]
+            without_scale = {key: value for key, value in plan.items() if key != "velocity_scale"}
+            cases.append((["hip", "knee"], 2, without_scale))
+            for names, frames, authoritative in cases:
+                with self.subTest(names=names, frames=frames, plan=authoritative):
+                    with self.assertRaises(ValueError):
+                        VELOCITY.validate_attestation(report, names, frames, authoritative)
 
     def test_angle_wraps_are_checked_as_actual_exported_differences(self):
         with tempfile.TemporaryDirectory() as directory:

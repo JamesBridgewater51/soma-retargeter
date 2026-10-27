@@ -119,7 +119,8 @@ class VelocityAccumulator:
 
     ``plan`` is ``load_velocity_contract(...)`` plus the clip's ``native_fps``.
     Angular observations are degrees, in the exact supplied header order. Frame
-    intervals in the report are zero-based CSV frame indices.
+    intervals in the report are zero-based CSV frame indices. Ratios use the
+    declared URDF limits multiplied by the effective ``velocity_scale``.
     """
 
     def __init__(self, joint_names, plan):
@@ -168,25 +169,84 @@ class VelocityAccumulator:
             self._worst_joint = self.names[worst]
             self._worst_interval = [self.frames - 1, self.frames]
 
+    def _metadata(self):
+        return {"schema": 1, "enabled": True, "joint_count": len(self.names),
+                "native_fps": self.fps, "angle_units": "deg", "limit_units": "rad/s",
+                "limit_basis": "URDF joint-name matched velocity attributes",
+                "relative_tolerance": RELATIVE_TOLERANCE,
+                "velocity_scale": self.velocity_scale, "urdf_sha256": self._urdf_sha256,
+                "ordered_joint_names_sha256": fingerprint(list(self.names)),
+                "velocity_limits_sha256": self._declared_fingerprint,
+                "effective_limits_sha256": self._effective_fingerprint,
+                "fingerprint_schema": "json-sha256-v1"}
+
     def finish(self):
         if self.frames < 1:
             raise ValueError("Cannot attest an empty CSV")
-        report = {"schema": 1, "enabled": True,
-                  "status": "passed" if not self._violation_count else "failed",
-                  "frames": self.frames, "joint_count": len(self.names),
-                  "checked_pairs": (self.frames - 1) * len(self.names),
-                  "violation_count": self._violation_count,
-                  "exceedance_frames": self._exceedance_frames,
+        report = {**self._metadata(), "status": "passed" if not self._violation_count else "failed",
+                  "frames": self.frames, "checked_pairs": (self.frames - 1) * len(self.names),
+                  "violation_count": self._violation_count, "exceedance_frames": self._exceedance_frames,
                   "max_ratio": self._max_ratio, "worst_joint": self._worst_joint,
-                  "worst_frame_interval": self._worst_interval,
-                  "native_fps": self.fps, "angle_units": "deg", "limit_units": "rad/s",
-                  "limit_basis": "URDF joint-name matched velocity attributes",
-                  "relative_tolerance": RELATIVE_TOLERANCE,
-                  "velocity_scale": self.velocity_scale, "urdf_sha256": self._urdf_sha256,
-                  "ordered_joint_names_sha256": fingerprint(list(self.names)),
-                  "velocity_limits_sha256": self._declared_fingerprint,
-                  "effective_limits_sha256": self._effective_fingerprint,
-                  "fingerprint_schema": "json-sha256-v1"}
+                  "worst_frame_interval": list(self._worst_interval) if self._worst_interval is not None else None}
         if self._violation_count:
             raise VelocityValidationError(report)
         return report
+
+
+def _receipt_number(report, name):
+    number = report.get(name)
+    if isinstance(number, bool) or not isinstance(number, (int, float)):
+        raise ValueError(f"Velocity attestation {name} must be numeric")
+    try:
+        finite = math.isfinite(number)
+    except OverflowError as error:
+        raise ValueError(f"Velocity attestation {name} must be finite") from error
+    if not finite:
+        raise ValueError(f"Velocity attestation {name} must be finite")
+    return number
+
+
+def _validate_worst_interval(report, names, frames):
+    if "worst_joint" not in report or "worst_frame_interval" not in report:
+        raise ValueError("Velocity attestation is missing worst-interval fields")
+    joint, interval = report["worst_joint"], report["worst_frame_interval"]
+    if frames == 1:
+        if joint is not None or interval is not None or report["max_ratio"] != 0:
+            raise ValueError("One-frame velocity attestation must have no worst interval and zero ratio")
+        return
+    if joint not in names or not isinstance(interval, list) or len(interval) != 2:
+        raise ValueError("Velocity attestation has an invalid worst joint or interval")
+    if (any(type(index) is not int for index in interval)
+            or not 0 <= interval[0] < interval[1] < frames or interval[1] != interval[0] + 1):
+        raise ValueError("Velocity attestation worst interval must be an adjacent in-range frame pair")
+
+
+def validate_attestation(report, joint_names, frames, plan):
+    """Validate a receipt against authoritative metadata without reading CSV data.
+
+    The caller must bind ``plan['velocity_scale']`` to the selected raw temporal
+    configuration and ``plan['native_fps']`` to the native per-clip metadata.
+    Source/product hashes and the outer CSV validation remain the caller's job.
+    """
+    if not isinstance(report, Mapping) or type(frames) is not int or frames < 1:
+        raise ValueError("Expected a velocity attestation and positive native frame count")
+    if not isinstance(plan, Mapping) or "velocity_scale" not in plan:
+        raise ValueError("Authoritative velocity plan must include the selected velocity_scale")
+    contract = VelocityAccumulator(joint_names, plan)
+    for field, expected in contract._metadata().items():
+        if report.get(field) != expected:
+            raise ValueError(f"Velocity attestation contract mismatch: {field}")
+    counts = {"schema": 1, "frames": frames, "joint_count": len(contract.names),
+              "checked_pairs": (frames - 1) * len(contract.names),
+              "violation_count": 0, "exceedance_frames": 0}
+    for field, expected in counts.items():
+        if type(report.get(field)) is not int or report[field] != expected:
+            raise ValueError(f"Velocity attestation counter mismatch: {field}")
+    if report.get("enabled") is not True or report.get("status") != "passed":
+        raise ValueError("Velocity attestation must be enabled and passed")
+    for field in ("native_fps", "velocity_scale", "relative_tolerance"):
+        _receipt_number(report, field)
+    ratio = _receipt_number(report, "max_ratio")
+    if not 0 <= ratio <= 1.0 + RELATIVE_TOLERANCE:
+        raise ValueError("Velocity attestation reports a speed-limit exceedance")
+    _validate_worst_interval(report, contract.names, frames)

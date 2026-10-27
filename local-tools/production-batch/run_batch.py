@@ -23,6 +23,7 @@ import traceback
 import uuid
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 ROOT_HEADER = ["Frame", "root_translateX", "root_translateY", "root_translateZ",
                "root_rotateX", "root_rotateY", "root_rotateZ"]
 
@@ -49,7 +50,8 @@ def optimization_key(job, settings):
 
 def conversion_key_for(optimized, settings):
     return key_for({"optimized": optimized["sha256"], "optimization_key": optimized["content_key"],
-                    "conversion": settings["conversion_overrides"], "provenance": settings["provenance"]})
+                    "conversion": settings["conversion_overrides"], "provenance": settings["provenance"],
+                    "final_batch_size": settings.get("final_batch_size", 128)})
 
 
 def atomic_json(path, value):
@@ -90,7 +92,19 @@ def bvh_metadata(path):
     return {"frames": frames, "fps": round(fps, 2), "source_fps": fps, "source_frame_time": dt}
 
 
-def validate_csv(path, headers, frames):
+def velocity_plan(settings, fps):
+    configured = settings.get("velocity_validation")
+    return {**configured, "native_fps": fps} if configured else None
+
+
+def validate_csv(path, headers, frames, velocity=None):
+    accumulator = None
+    if velocity:
+        from csv_velocity import VelocityAccumulator
+        names = headers[len(ROOT_HEADER):]
+        if len(names) != 31 or len(set(names)) != 31:
+            raise ValueError("Hard-velocity CSV must contain 31 uniquely named actuated joints")
+        accumulator = VelocityAccumulator(names, velocity)
     with Path(path).open(newline="") as stream:
         reader = csv.reader(stream)
         if next(reader, None) != headers:
@@ -102,8 +116,13 @@ def validate_csv(path, headers, frames):
             values = [float(item) for item in row]
             if not all(math.isfinite(item) for item in values) or values[0] != count - 1:
                 raise ValueError(f"Nonfinite data or invalid frame index at row {count}")
+            if accumulator is not None:
+                accumulator.observe_angles(values[len(ROOT_HEADER):])
     if count != frames:
         raise ValueError(f"CSV has {count} frames, expected {frames}")
+    report = accumulator.finish() if accumulator is not None else {
+        "enabled": False, "violation_count": 0, "max_ratio": None, "checked_pairs": 0}
+    return {"schema": 2, "frames": count, "columns": len(headers), "velocity": report}
 
 
 def receipt_valid(path, expected_key, product):
@@ -213,20 +232,24 @@ def process_locked(job, settings, weights_dir):
             resumed = bool(done)
             if done:
                 try:
-                    validate_csv(output, done["headers"], metadata["frames"])
+                    checked = validate_csv(output, done["headers"], metadata["frames"], velocity_plan(settings, metadata["fps"]))
                     if done["frames"] != metadata["frames"] or not math.isclose(done["fps"], metadata["fps"], rel_tol=1e-8):
                         raise ValueError("Resume FPS/frame metadata mismatch")
+                    if done.get("validation") != checked:
+                        done["validation"] = checked
+                        atomic_json(done_path, done)
                 except (OSError, KeyError, ValueError):
                     done = None
                     resumed = False
             if not done:
                 tick = time.monotonic()
-                headers = convert(source, output, own_config, metadata)
+                headers, checked = convert(source, output, own_config,
+                                           {**metadata, "velocity_plan": velocity_plan(settings, metadata["fps"])})
                 convert_seconds = time.monotonic() - tick
                 done = {"content_key": conversion_key, "sha256": digest(output),
                         "optimization_key": optimize_key, "weights_sha256": optimized["sha256"],
                         "source_sha256": job["sha256"], "archive_member": job["archive_member"],
-                        "headers": headers, **metadata, "seconds": convert_seconds}
+                        "headers": headers, **metadata, "seconds": convert_seconds, "validation": checked}
                 atomic_json(done_path, done)
             verify_protected_files(settings)
             return {"stem": job["stem"], "ok": True, "resumed": resumed,
@@ -326,13 +349,23 @@ def convert(source, output, config, metadata):
     temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
     try:
         save_csv(str(temporary), names, buffers[0])
-        validate_csv(temporary, headers, metadata["frames"])
+        checked = validate_csv(temporary, headers, metadata["frames"], metadata.get("velocity_plan"))
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, output)
     finally:
         temporary.unlink(missing_ok=True)
-    return headers
+    return headers, checked
+
+
+def urdf_velocity_validation(entry, asset_root, temporal_config):
+    if not temporal_config.get("hard_velocity", False):
+        return None
+    if "urdf_path" not in entry.desc or "newton_asset" in entry.desc:
+        raise ValueError("Independent hard-velocity validation requires an explicit URDF asset")
+    from csv_velocity import load_velocity_contract
+    urdf = asset_root / entry.desc["urdf_path"]
+    return load_velocity_contract(urdf, velocity_scale=temporal_config.get("velocity_scale", 1.0))
 
 
 def optimizer_with_selected_temporal(optimizer, conversion_overrides):
@@ -394,6 +427,8 @@ def prepare_settings(args):
     return {**{key: str(root / value) for key, value in relative.items()},
             "optimizer": optimizer, "base_retargeter": baseline, "module_origins": origins,
             "conversion_overrides": overrides, "provenance": provenance,
+            "velocity_validation": urdf_velocity_validation(
+                entry, asset_root, overrides.get("temporal_ik", baseline.get("temporal_ik", {}))),
             "protected_files": {str(path): digest(path) for path in (
                 baseline_path, asset_root / baseline["human_robot_scaler_config"])}}
 

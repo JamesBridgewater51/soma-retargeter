@@ -2,6 +2,7 @@ import copy
 import csv
 import importlib.util
 import json
+import math
 from pathlib import Path
 import tempfile
 import unittest
@@ -53,6 +54,45 @@ class BatchValidationTests(unittest.TestCase):
                             BATCH.validate_csv(path, ["Frame", "joint"], expected_frames)
                     else:
                         BATCH.validate_csv(path, ["Frame", "joint"], expected_frames)
+
+    def test_hard_velocity_uses_joint_names_native_fps_and_one_frame_boundary(self):
+        names = [f"joint_{index}" for index in reversed(range(31))]
+        headers = BATCH.ROOT_HEADER + names
+        limits = {f"joint_{index}": 1.0 + index / 10.0 for index in range(31)}
+        cases = [(1, 0.0, 120.0, False), (2, 1.0, 120.0, False),
+                 (2, 1.00005, 60.0, False), (2, 1.0002, 120.0, True)]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hard.csv"
+            for frames, ratio, fps, invalid in cases:
+                with self.subTest(frames=frames, ratio=ratio, fps=fps):
+                    first = [0.0] * len(headers)
+                    second = first.copy()
+                    second[0] = 1
+                    second[headers.index("joint_7")] = math.degrees(limits["joint_7"] * ratio / fps)
+                    with path.open("w", newline="") as stream:
+                        writer = csv.writer(stream)
+                        writer.writerow(headers)
+                        writer.writerows([first] if frames == 1 else [first, second])
+                    plan = {"limits_rad_s": limits, "native_fps": fps,
+                            "relative_tolerance": 1e-4, "urdf_sha256": "a" * 64, "velocity_scale": 1.0}
+                    if invalid:
+                        with self.assertRaisesRegex(ValueError, "violates URDF speed"):
+                            BATCH.validate_csv(path, headers, frames, plan)
+                    else:
+                        report = BATCH.validate_csv(path, headers, frames, plan)["velocity"]
+                        self.assertEqual(report["violation_count"], 0)
+                        self.assertEqual(report["checked_pairs"], 31 * (frames - 1))
+                        self.assertAlmostEqual(report["max_ratio"], ratio)
+
+    def test_missing_urdf_joint_limit_never_silently_disables_speed_validation(self):
+        headers = BATCH.ROOT_HEADER + [f"joint_{index}" for index in range(31)]
+        plan = {"limits_rad_s": {}, "native_fps": 120.0,
+                "relative_tolerance": 1e-4, "urdf_sha256": "a" * 64, "velocity_scale": 1.0}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.csv"
+            path.write_text(",".join(headers) + "\n" + ",".join(["0"] * len(headers)) + "\n")
+            with self.assertRaisesRegex(ValueError, "missing a matching URDF angular velocity limit"):
+                BATCH.validate_csv(path, headers, 1, plan)
 
     def test_optimization_cannot_change_scaler_or_nonweight_configuration(self):
         baseline = {"human_robot_scaler_config": "fixed-scaler.json", "ik_iterations": 24,

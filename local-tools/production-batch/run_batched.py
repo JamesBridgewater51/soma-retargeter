@@ -7,6 +7,7 @@ from collections import defaultdict
 import contextlib
 import copy
 import fcntl
+import gc
 import hashlib
 import json
 import math
@@ -68,7 +69,9 @@ def completed_receipt(job, settings):
     done = batch.receipt_valid(paths["done"], batch.conversion_key_for(optimized, settings), paths["csv"])
     if done:
         try:
-            batch.validate_csv(paths["csv"], done["headers"], job["frames"])
+            checked = batch.validate_csv(paths["csv"], done["headers"], job["frames"], batch.velocity_plan(settings, job["fps"]))
+            if done.get("validation") != checked:
+                return None
             if done["frames"] != job["frames"] or not math.isclose(done["fps"], job["fps"], rel_tol=1e-8):
                 return None
             return done
@@ -144,7 +147,7 @@ def export_buffer(job, settings, buffer, headers):
     temporary = paths["csv"].with_name(f".{paths['csv'].name}.{uuid.uuid4().hex}.tmp")
     try:
         save_csv(str(temporary), headers[len(batch.ROOT_HEADER):], buffer)
-        batch.validate_csv(temporary, headers, job["frames"])
+        checked = batch.validate_csv(temporary, headers, job["frames"], batch.velocity_plan(settings, job["fps"]))
         with temporary.open("rb") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, paths["csv"])
@@ -158,10 +161,18 @@ def export_buffer(job, settings, buffer, headers):
         "optimization_key": optimized["content_key"], "weights_sha256": optimized["sha256"],
         "source_sha256": job["sha256"], "archive_member": job["archive_member"],
         "headers": headers, "frames": job["frames"], "fps": job["fps"],
-        "source_fps": job["source_fps"], "source_frame_time": job["source_frame_time"], "engine": settings["engine"]})
+        "source_fps": job["source_fps"], "source_frame_time": job["source_frame_time"],
+        "engine": settings["engine"], "final_batch_size": settings.get("final_batch_size", 128), "validation": checked})
 
 
 def convert_missing(jobs, settings, prepared=None):
+    cap = settings.get("final_batch_size", 128)
+    if len(jobs) > cap:
+        started = time.monotonic()
+        for offset in range(0, len(jobs), cap):
+            convert_missing(jobs[offset:offset + cap], settings, prepared)
+            gc.collect()
+        return time.monotonic() - started
     import newton
     import warp as wp
     from batched_optimizer import PerSequencePipeline
@@ -236,6 +247,7 @@ def run(args):
     settings["engine"] = "native-independent-batched"
     settings["reuse_geometry"] = args.reuse_geometry
     settings["fast_bvh"] = args.fast_bvh
+    settings["final_batch_size"] = args.final_batch_size
     for key, override in (("output", args.output_root), ("weights", args.weights_root),
                           ("logs", args.log_root), ("artifacts", args.artifact_root)):
         if override:
@@ -305,6 +317,8 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--final-batch-size", type=int, default=128,
+                        help="Maximum independent full-post conversion environments; search batch is unchanged")
     parser.add_argument("--fast-bvh", action="store_true", help="Use bit-exact vectorized native BVH decoding")
     parser.add_argument("--reuse-geometry", action="store_true",
                         help="Reuse immutable post-OFF model geometry; keep all per-probe solver/history state fresh")
@@ -313,7 +327,7 @@ def parse_args():
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--retries", type=int, default=1)
     args = parser.parse_args()
-    if (args.batch_size < 1 or args.length_bucket_frames < 1 or args.limit < 0 or args.retries < 0
+    if (args.batch_size < 1 or args.final_batch_size < 1 or args.length_bucket_frames < 1 or args.limit < 0 or args.retries < 0
             or not 0 <= args.shard_index < args.shard_count):
         parser.error("Invalid batch, bucket, limit, retry or shard arguments")
     return args

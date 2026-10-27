@@ -78,6 +78,34 @@ def _check_source(job):
     return batch.bvh_metadata(source)
 
 
+def _check_export_validation(done, settings, metadata, headers):
+    temporal = settings['conversion_overrides'].get('temporal_ik', settings['base_retargeter'].get('temporal_ik', {}))
+    hard_selected = bool(temporal.get('hard_velocity', False))
+    validation = done.get('validation')
+    if validation is None and not hard_selected:
+        return None  # Legacy native nonhard receipts predate the explicit validation report.
+    _require(isinstance(validation, dict) and validation.get('schema') == 2
+             and validation.get('frames') == metadata['frames'] and validation.get('columns') == 38,
+             'export_validation', 'Missing or inconsistent native CSV validation report')
+    velocity = validation.get('velocity')
+    _require(isinstance(velocity, dict), 'export_validation', 'Missing native velocity validation report')
+    if hard_selected:
+        plan = batch.velocity_plan(settings, metadata['fps'])
+        _require(plan is not None and 'velocity_scale' in plan
+                 and plan['velocity_scale'] == float(temporal.get('velocity_scale', 1.0)),
+                 'velocity_plan', 'Hard-selected plan must bind the explicitly selected velocity scale')
+        from csv_velocity import validate_attestation
+        try:
+            validate_attestation(velocity, headers[len(batch.ROOT_HEADER):], metadata['frames'], plan)
+        except ValueError as exc:
+            raise AuditFailure('velocity_attestation', str(exc)) from exc
+    else:
+        _require(velocity.get('enabled') is False and velocity.get('violation_count') == 0
+                 and velocity.get('checked_pairs') == 0 and velocity.get('max_ratio') is None,
+                 'export_validation', 'Nonhard receipt contains inconsistent velocity validation')
+    return validation
+
+
 def _audit_product(job, settings, metadata):
     paths = _product_paths(job, settings)
     _require(not paths['config'].parent.is_symlink(), 'data_alias', 'Per-sequence weights directory is a symlink')
@@ -93,16 +121,14 @@ def _audit_product(job, settings, metadata):
     _require(done['optimization_key'] == optimized['content_key'] and done['weights_sha256'] == optimized['sha256'],
              'weights_binding', 'Completion receipt points to different optimized weights')
     _check_metadata(done, job, metadata)
-    temporal = settings['conversion_overrides'].get('temporal_ik', {})
-    _require(not temporal.get('hard_velocity', False), 'hard_velocity_attestation_unavailable',
-             'Native hard-velocity receipt contract is not integrated; refusing COMPLETE')
     headers = _check_headers(paths['csv'], done)
+    validation = _check_export_validation(done, settings, metadata, headers)
     for key, signature in signatures.items():
         _require(signature == _file_signature(paths[key]), 'concurrent_change', f'Product changed during audit: {paths[key]}')
     return {'stem': job['stem'], 'source_sha256': job['sha256'], 'csv': str(paths['csv']),
             'csv_sha256': done['sha256'], 'weights_sha256': optimized['sha256'],
             'optimization_key': optimized['content_key'], 'conversion_key': done['content_key'],
-            'frames': done['frames'], 'fps': done['fps'], 'headers': headers}
+            'frames': done['frames'], 'fps': done['fps'], 'headers': headers, 'validation': validation}
 
 
 def _manifest_rows(manifest, source_root):

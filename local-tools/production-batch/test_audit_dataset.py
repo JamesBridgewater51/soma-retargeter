@@ -54,11 +54,26 @@ class DatasetFixture:
             writer = csv.writer(stream)
             writer.writerow(HEADERS)
             writer.writerows([[frame] + [0.1] * 37 for frame in range(metadata['frames'])])
-        batch.validate_csv(paths['csv'], HEADERS, metadata['frames'])
+        checked = batch.validate_csv(paths['csv'], HEADERS, metadata['frames'],
+                                     batch.velocity_plan(self.settings, metadata['fps']))
         batch.atomic_json(paths['done'], {'content_key': batch.conversion_key_for(optimized, self.settings),
                           'sha256': batch.digest(paths['csv']), 'optimization_key': optimized['content_key'],
                           'weights_sha256': optimized['sha256'], 'source_sha256': job['sha256'],
-                          'archive_member': job['archive_member'], 'headers': HEADERS, **metadata})
+                          'archive_member': job['archive_member'], 'headers': HEADERS,
+                          'validation': checked, **metadata})
+
+    def enable_hard_velocity(self, scale=0.8):
+        from csv_velocity import load_velocity_contract
+        urdf = self.root / 'robot.urdf'
+        urdf.write_text('<robot name="synthetic">' + ''.join(
+            f'<joint name="{name}" type="revolute"><limit velocity="2.0"/></joint>'
+            for name in HEADERS[len(batch.ROOT_HEADER):]) + '</robot>')
+        self.settings['conversion_overrides'] = {'temporal_ik': {'enabled': True, 'hard_velocity': True,
+                                                               'velocity_scale': scale}}
+        self.settings['velocity_validation'] = load_velocity_contract(urdf, scale)
+        self.settings['provenance'][str(urdf)] = batch.digest(urdf)
+        for job in self.jobs:
+            self.publish(job)
 
     def run(self):
         return audit.audit_dataset(self.manifest, self.sources, self.settings, expected_count=2)
@@ -122,7 +137,43 @@ class DatasetAuditTests(unittest.TestCase):
             self.fixture.publish(job)
         report = self.fixture.run()
         self.assertEqual(report['status'], 'INCOMPLETE')
-        self.assertIn('hard_velocity_attestation_unavailable', report['failure_categories'])
+        self.assertIn('velocity_plan', report['failure_categories'])
+
+    def test_real_native_hard_attestations_complete_and_preserve_physical_evidence(self):
+        self.fixture.enable_hard_velocity()
+        report = self.fixture.run()
+        self.assertEqual(report['status'], 'COMPLETE')
+        for product in report['products']:
+            velocity = product['validation']['velocity']
+            self.assertEqual(velocity['status'], 'passed')
+            self.assertEqual(velocity['velocity_scale'], 0.8)
+            self.assertEqual(velocity['checked_pairs'], (product['frames'] - 1) * 31)
+            self.assertEqual(velocity['violation_count'], 0)
+
+    def test_corrupted_hard_attestation_fails_without_reparsing_numeric_rows(self):
+        self.fixture.enable_hard_velocity()
+        paths = self.fixture.paths(self.fixture.jobs[0])
+        original = batch.load_json(paths['done'])
+        mutations = [('schema', 9), ('status', 'failed'), ('enabled', False), ('frames', 99),
+                     ('joint_count', 30), ('checked_pairs', 0), ('violation_count', 1),
+                     ('exceedance_frames', 1), ('max_ratio', 1.1), ('max_ratio', float('nan')),
+                     ('native_fps', 120), ('angle_units', 'rad'), ('limit_units', 'deg/s'),
+                     ('relative_tolerance', 0.1), ('velocity_scale', 1.0),
+                     ('urdf_sha256', '0' * 64), ('ordered_joint_names_sha256', '0' * 64),
+                     ('velocity_limits_sha256', '0' * 64), ('effective_limits_sha256', '0' * 64),
+                     ('fingerprint_schema', 'unknown'), ('worst_joint', 'missing'),
+                     ('worst_frame_interval', [0, 99])]
+        for key, changed in mutations:
+            with self.subTest(key=key, changed=changed):
+                corrupted = copy.deepcopy(original)
+                corrupted['validation']['velocity'][key] = changed
+                paths['done'].write_text(json.dumps(corrupted))
+                report = self.fixture.run()
+                self.assertEqual(report['status'], 'INCOMPLETE')
+                self.assertIn('velocity_attestation', report['failure_categories'])
+        batch.atomic_json(paths['done'], original)
+        del self.fixture.settings['velocity_validation']['velocity_scale']
+        self.assertIn('velocity_plan', self.fixture.run()['failure_categories'])
 
     def test_receipt_source_weights_metadata_and_header_mismatch_are_rejected(self):
         mutations = [('source_sha256', 'wrong'), ('archive_member', 'wrong'),
