@@ -1,0 +1,13 @@
+{
+  "temporal_ik": {
+    "enabled": true,
+    "mode": "prediction",
+    "weight": 0.25,
+    "hard_velocity": true,
+    "velocity_scale": 1.0,
+    "limit_margin": 0.05,
+    "limit_weight": 0.0,
+    "velocity_avoidance_weight": 0.1,
+    "velocity_margin_fraction": 0.2
+  }
+}

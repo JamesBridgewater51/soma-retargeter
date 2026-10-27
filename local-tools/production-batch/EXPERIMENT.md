@@ -31,6 +31,14 @@ Clock starts 2026-10-27 14:18 UTC; target deadline 23:18 UTC. This is a target, 
 - Failures are explicit and isolated; unsuccessful runs are not completion.
 - Progress and throughput-derived ETA are persisted and surfaced.
 
+## Selected inner-IK configuration
+
+`temporal-selected.json` freezes prediction residual multiplier 0.25, hard velocity bounds at the URDF limit, and normalized near-velocity-limit avoidance multiplier 0.1 with a 20% activation margin. The extra positional near-limit term is disabled; original native positional constraints remain. Outer weight-optimizer smoothness scoring is unchanged.
+
+Corrected adaptive LM preserves damping across iterations; the earlier per-iteration-reset hard-limit experiments are retained as rejected implementation evidence, not used for selection. Across the same eleven clips and frozen optimized weights, pooled full-output position RMSE changes from 0.111528 to 0.113602 m, jerk RMS from 13244 to 7953 rad/s³, and maximum absolute jerk from 1594271 to 302619 rad/s³. Default-weight position RMSE changes from 0.124994 to 0.126818 m, jerk RMS from 10577 to 9076 rad/s³, and maximum absolute jerk from 1012506 to 294383 rad/s³. Both selected branches have zero exported velocity-limit exceedances at relative tolerance 1e-4. Some default-weight P99 values increase; this is not an all-metrics improvement claim.
+
+Evidence: the PT artifact `temporal-adaptive-damping-comparison/aggregate-comparison.json`, under `artifacts/soma-retargeter/agibot-x2ultra/`. Budget and throughput validation for full production remain distinct from this completed inner-IK selection.
+
 ## Verified launch constraints
 
 - `clusterx --include` matches Kubernetes hostnames, not management node names. The authorized fragmented nodes `ecp-tcluster-a844` and `ecp-tcluster-ab45` correspond to `host-10-140-62-36` and `host-10-140-108-112`. The corrected probe scheduled on the first physical node in eight seconds; the management-name selector remained pending.
