@@ -10,6 +10,7 @@ import numpy as np
 import warp as wp
 
 from app.tools import ik_weight_optimizer as native
+from batched_recorder import BatchedRecorder
 from soma_retargeter.pipelines.batched_weight_objectives import BatchedPositionObjective, BatchedRotationObjective
 from soma_retargeter.pipelines.soma_retargeting_pipeline import SomaRetargetingPipeline
 from soma_retargeter.utils.space_conversion_utils import FacingDirectionType, SpaceConverter
@@ -33,6 +34,11 @@ class PerSequencePipeline(SomaRetargetingPipeline):
         pipeline.temporal_ik_config = copy.deepcopy(template.temporal_ik_config)
         pipeline.clear()
         return pipeline
+
+    def _create_frame_recorder(self, joint_q, num_frames_to_remove):
+        return BatchedRecorder(joint_q,
+            [len(targets) - num_frames_to_remove for targets in self.input_targets],
+            num_frames_to_remove, self.capture_base_motion)
 
     def _create_ik_objectives(self, num_envs, model, state):
         positions, rotations, limits, smooth = super()._create_ik_objectives(num_envs, model, state)

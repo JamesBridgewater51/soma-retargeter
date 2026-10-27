@@ -40,9 +40,15 @@ def motion_groups(selected, args):
     buckets = defaultdict(list)
     for job in selected:
         inspected = inspect_motion(job)
-        key = (inspected["hierarchy_sha256"], (inspected["frames"] - 1) // args.length_bucket_frames)
-        buckets[key].append(inspected)
-        if len(buckets[key]) == args.batch_size:
+        hierarchy = "certified-soma-x2-decoded" if getattr(args, "decoded_bvh", False) else inspected["hierarchy_sha256"]
+        key = (hierarchy, (inspected["frames"] - 1) // args.length_bucket_frames)
+        pending = buckets[key]
+        maximum_frames = max([inspected["frames"], *(row["frames"] for row in pending)])
+        if pending and (len(pending) + 1) * maximum_frames > args.max_batch_frames:
+            yield buckets.pop(key)
+            pending = buckets[key]
+        pending.append(inspected)
+        if len(pending) == args.batch_size:
             yield buckets.pop(key)
     for key in sorted(buckets):
         yield buckets[key]
@@ -90,9 +96,19 @@ def load_animations(jobs, settings, prepared=None):
         cached = {jobs[0]["stem"]: first}
     else:
         skeleton, cached = prepared
+    certification = None
+    if settings.get("decoded_bvh", False):
+        from decoded_bvh import certify_soma_x2_topology, load_decoded_bvh
+        certification = certify_soma_x2_topology(skeleton)
     for job in jobs:
         if job["stem"] not in cached:
-            cached[job["stem"]] = load_bvh(job["source"], skeleton)[1]
+            if certification is None:
+                cached[job["stem"]] = load_bvh(job["source"], skeleton)[1]
+            else:
+                cached[job["stem"]] = load_decoded_bvh(
+                    job["source"], skeleton,
+                    decoder="fast" if settings.get("fast_bvh", False) else "native",
+                    certification=certification)[1]
     animations = [cached[job["stem"]] for job in jobs]
     for job, animation in zip(jobs, animations, strict=True):
         if not math.isclose(float(animation.sample_rate), job["fps"], rel_tol=1e-8):
@@ -256,7 +272,9 @@ def run(args):
     settings["engine"] = "native-independent-batched"
     settings["reuse_geometry"] = args.reuse_geometry
     settings["fast_bvh"] = args.fast_bvh
+    settings["decoded_bvh"] = args.decoded_bvh
     settings["final_batch_size"] = args.final_batch_size
+    settings["max_batch_frames"] = args.max_batch_frames
     settings["snapshot_iterations"] = [int(token) for token in args.snapshot_iterations.split(",") if token]
     if any(budget < 1 or budget > settings["optimizer"]["outer_iterations"] for budget in settings["snapshot_iterations"]):
         raise ValueError("Snapshot prefixes must be within the explicitly configured optimizer budget")
@@ -335,9 +353,13 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--max-batch-frames", type=int, default=4000000,
+                        help="Bound padded search frames while allowing large same-length cohorts")
     parser.add_argument("--final-batch-size", type=int, default=128,
                         help="Maximum independent full-post conversion environments; search batch is unchanged")
     parser.add_argument("--fast-bvh", action="store_true", help="Use bit-exact vectorized native BVH decoding")
+    parser.add_argument("--decoded-bvh", action="store_true",
+                        help="Own-decode and certify exact native SOMA topology conformance before batching")
     parser.add_argument("--reuse-geometry", action="store_true",
                         help="Reuse immutable post-OFF model geometry; keep all per-probe solver/history state fresh")
     parser.add_argument("--length-bucket-frames", type=int, default=256)
@@ -348,7 +370,7 @@ def parse_args():
     parser.add_argument("--snapshot-iterations", default="", help="Explicit native-search prefix budgets to retain for pilot quality comparisons")
     parser.add_argument("--retries", type=int, default=1)
     args = parser.parse_args()
-    if (args.batch_size < 1 or args.final_batch_size < 1 or args.length_bucket_frames < 1 or args.limit < 0 or args.retries < 0
+    if (args.batch_size < 1 or args.final_batch_size < 1 or args.max_batch_frames < 1 or args.length_bucket_frames < 1 or args.limit < 0 or args.retries < 0
             or not 0 <= args.shard_index < args.shard_count):
         parser.error("Invalid batch, bucket, limit, retry or shard arguments")
     return args
