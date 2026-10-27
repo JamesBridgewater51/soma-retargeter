@@ -121,6 +121,53 @@ class IKNearLimitObjective(IKTemporalObjective):
                           self.weight, start_idx, jacobian], device=self.device)
 
 
+@wp.kernel
+def _velocity_avoidance_residual(q: wp.array2d(dtype=float), previous: wp.array2d(dtype=float),
+                                 coords: wp.array(dtype=int), step: wp.array2d(dtype=float),
+                                 activation: float, weight: wp.array(dtype=float), start: int,
+                                 residual: wp.array2d(dtype=float)):
+    env, i = wp.tid()
+    ratio = (q[env, coords[i]] - previous[env, coords[i]]) / step[env, i]
+    residual[env, start + i] = weight[0] * (ratio - wp.clamp(ratio, -activation, activation))
+
+
+@wp.kernel
+def _velocity_avoidance_jacobian(q: wp.array2d(dtype=float), previous: wp.array2d(dtype=float),
+                                 coords: wp.array(dtype=int), dofs: wp.array(dtype=int),
+                                 step: wp.array2d(dtype=float), activation: float,
+                                 weight: wp.array(dtype=float), start: int,
+                                 jacobian: wp.array3d(dtype=float)):
+    env, i = wp.tid()
+    ratio = (q[env, coords[i]] - previous[env, coords[i]]) / step[env, i]
+    derivative = float(0.0)
+    if wp.abs(ratio) > activation:
+        derivative = weight[0] / step[env, i]
+    jacobian[env, start + i, dofs[i]] = derivative
+
+
+class IKVelocityAvoidanceObjective(IKTemporalObjective):
+    """Dimensionless hinge on |delta q|/(scaled URDF vmax * dt).
+
+    A margin fraction of 0.2 starts avoidance at 80% of the per-step bound.
+    This term is independent of absolute-angle near-limit avoidance.
+    """
+
+    def __init__(self, coords, dofs, previous, step, margin_fraction, weight):
+        super().__init__(coords, dofs, previous, weight)
+        self.step = step
+        self.activation = 1.0 - margin_fraction
+
+    def compute_residuals(self, body_q, joint_q, model, residuals, start_idx, problem_idx):
+        wp.launch(_velocity_avoidance_residual, (joint_q.shape[0], self.residual_dim()),
+                  inputs=[joint_q, self.target, self.coords, self.step, self.activation,
+                          self.weight_buffer, start_idx, residuals], device=self.device)
+
+    def compute_jacobian_analytic(self, body_q, joint_q, model, jacobian, joint_S_s, start_idx):
+        wp.launch(_velocity_avoidance_jacobian, (joint_q.shape[0], self.residual_dim()),
+                  inputs=[joint_q, self.target, self.coords, self.dofs, self.step, self.activation,
+                          self.weight_buffer, start_idx, jacobian], device=self.device)
+
+
 def scalar_joint_metadata(model, urdf_path=None):
     """Map scalar actuated joints to true DoF limits and URDF velocity units."""
     urdf_joints = {}
@@ -177,14 +224,18 @@ class TemporalIK:
         self.velocity_scale = float(config.get('velocity_scale', 1.0))
         self.limit_margin = float(config.get('limit_margin', 0.0))
         self.limit_weight = float(config.get('limit_weight', 0.0))
+        self.velocity_avoidance_weight = float(config.get('velocity_avoidance_weight', 0.0))
+        self.velocity_margin_fraction = float(config.get('velocity_margin_fraction', 0.2))
+        if not np.isfinite(self.velocity_margin_fraction) or not 0 <= self.velocity_margin_fraction < 1:
+            raise ValueError('temporal_ik.velocity_margin_fraction must lie in [0, 1)')
         if self.mode not in ('position', 'prediction'):
             raise ValueError("temporal_ik.mode must be 'position' or 'prediction'")
-        for name in ('weight', 'velocity_scale', 'limit_margin', 'limit_weight'):
+        for name in ('weight', 'velocity_scale', 'limit_margin', 'limit_weight', 'velocity_avoidance_weight'):
             value = getattr(self, name)
             if not np.isfinite(value) or value < 0 or (name == 'velocity_scale' and value == 0):
                 raise ValueError(f'temporal_ik.{name} has invalid value {value}')
         self.coords, self.dofs, self.angle_lower, self.angle_upper, self.velocities = scalar_joint_metadata(
-            model, urdf_path if self.hard_velocity else None)
+            model, urdf_path if self.hard_velocity or self.velocity_avoidance_weight > 0 else None)
         if not len(self.coords):
             raise ValueError('Temporal IK requires scalar actuated joints')
         self.sample_rates = sample_rates
@@ -198,6 +249,17 @@ class TemporalIK:
         self.limit_objective = IKNearLimitObjective(
             self.coords, self.dofs, self.angle_lower, self.angle_upper,
             self.limit_margin, self.limit_weight)
+        self.velocity_objective = None
+        if self.velocity_avoidance_weight > 0:
+            # Reuse the hard-bound unit validation even when only avoidance is enabled.
+            frame_bounds(self.previous[:, self.coords], self.angle_lower, self.angle_upper,
+                         self.velocities, self.sample_rates, self.velocity_scale)
+            step = self.velocities[None, :] * self.velocity_scale / np.asarray(sample_rates)[:, None]
+            previous_target = wp.array(initial, dtype=float, device=model.device)
+            self.velocity_objective = IKVelocityAvoidanceObjective(
+                self.coords, self.dofs, previous_target,
+                wp.array(step.astype(np.float32), dtype=float, device=model.device),
+                self.velocity_margin_fraction, self.velocity_avoidance_weight)
         self.coords_wp = wp.array(self.coords, dtype=int, device=model.device)
         shape = (num_envs, len(self.coords))
         self.lower = wp.empty(shape, dtype=float, device=model.device)
@@ -214,7 +276,12 @@ class TemporalIK:
 
     def prepare(self):
         if self.weight > 0:
-            self.objective.weight_buffer.assign(np.array([self.weight if self.frames > 0 else 0.0], dtype=np.float32))
+            history_ready = self.frames >= (2 if self.mode == 'prediction' else 1)
+            self.objective.weight_buffer.assign(np.array([self.weight if history_ready else 0.0], dtype=np.float32))
+        if self.velocity_objective is not None:
+            self.velocity_objective.target.assign(self.previous)
+            self.velocity_objective.weight_buffer.assign(np.array([
+                self.velocity_avoidance_weight if self.frames > 0 else 0.0], dtype=np.float32))
         target = self.previous.copy()
         if self.mode == 'prediction' and self.frames >= 2:
             target[:, self.coords] += (self.previous - self.older)[:, self.coords]

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Multi-pass IK retargeting pipeline with contact detection and foot-plant correction for humanoid-to-robot motion transfer."""
 import os
+import time
 from typing import Optional
 
 import warp as wp
@@ -15,7 +16,7 @@ import soma_retargeter.utils.pose_utils as pose_utils
 import soma_retargeter.pipelines.utils as pipeline_utils
 import soma_retargeter.robotics.robot_registry as robot_registry
 from soma_retargeter.pipelines.ik_solver import IKSolver, BaseIKSolver
-from soma_retargeter.pipelines.ik_pass import BasePass, PostProcessPass
+from soma_retargeter.pipelines.ik_pass import BasePass, PostProcessPass, ConstrainedRepairPass
 from soma_retargeter.pipelines.temporal_ik import TemporalIK
 
 from soma_retargeter.animation.skeleton import Skeleton, SkeletonInstance
@@ -453,8 +454,10 @@ class SomaRetargetingPipeline:
         temporal = None
         if self.temporal_ik_config.get('enabled', False):
             asset_info = pipeline_utils.get_target_asset_path(self.target_type)
-            if self.temporal_ik_config.get('hard_velocity', False) and 'urdf_path' not in asset_info:
-                raise ValueError('Hard velocity limits require a URDF with explicit velocity limits')
+            needs_velocity = (self.temporal_ik_config.get('hard_velocity', False)
+                              or self.temporal_ik_config.get('velocity_avoidance_weight', 0) > 0)
+            if needs_velocity and 'urdf_path' not in asset_info:
+                raise ValueError('Velocity constraints require a URDF with explicit velocity limits')
             temporal = TemporalIK(
                 self.ik_model, num_envs, self.input_sample_rates,
                 self.human_robot_scaler.reference_joint_q, self.temporal_ik_config,
@@ -463,6 +466,8 @@ class SomaRetargetingPipeline:
                 extra_objectives.append(temporal.objective)
             if temporal.limit_weight > 0:
                 extra_objectives.append(temporal.limit_objective)
+            if temporal.velocity_objective is not None:
+                extra_objectives.append(temporal.velocity_objective)
 
         num_frames_to_remove = self.num_initialization_frames + self.num_stabilization_frames
 
@@ -478,6 +483,7 @@ class SomaRetargetingPipeline:
         # shared joint_q written by every pass; all later passes hold a reference to this buffer
         joint_q = wp.clone(base_ik_solver.joint_q)
 
+        graph_setup_started = time.perf_counter()
         passes = []
 
         passes.append(BasePass(
@@ -508,6 +514,11 @@ class SomaRetargetingPipeline:
                 plant_blenders=self.plant_blenders,
             ))
 
+        if temporal is not None and temporal.hard_velocity and self.post_processing_enabled:
+            passes.append(ConstrainedRepairPass(base_ik_solver, joint_q, state, self.ik_iterations))
+        self.graph_setup_seconds = time.perf_counter() - graph_setup_started
+        print(f"[INFO] IK graph setup seconds: {self.graph_setup_seconds:.3f}")
+
         n_coords = joint_q.shape[1]
         joint_q_frames_wp = [
             wp.empty(
@@ -520,6 +531,7 @@ class SomaRetargetingPipeline:
         base_q_frames_wp = [wp.empty_like(frames) for frames in joint_q_frames_wp] if self.capture_base_motion else []
 
         # main pass for every frame
+        frame_loop_started = time.perf_counter()
         for frame in trange(self.max_frames, desc="[INFO] Retargeting Motions"):
             for pass_index, pass_ in enumerate(passes):
                 pass_.execute(frame)
@@ -530,13 +542,6 @@ class SomaRetargetingPipeline:
                             wp.copy(base_q_frames_wp[env][frame - num_frames_to_remove], joint_q[env])
 
             if temporal is not None:
-                if temporal.hard_velocity and self.post_processing_enabled:
-                    # Preserve the post-pass intent in task space, then solve inside
-                    # the SAME frame's feasible box. Never export a naked clamp.
-                    base_ik_solver.inherit_from_state(state)
-                    base_ik_solver.sync_joint_q_from(joint_q)
-                    base_ik_solver.solve(state, self.ik_iterations)
-                    wp.copy(joint_q, base_ik_solver.joint_q)
                 temporal.record(joint_q)
 
             # record to joint_q_frames_wp buffer
@@ -545,6 +550,8 @@ class SomaRetargetingPipeline:
                     if frame > (len(self.input_targets[env])-1):
                         continue
                     wp.copy(joint_q_frames_wp[env][frame - num_frames_to_remove], joint_q[env])
+        self.frame_loop_seconds = time.perf_counter() - frame_loop_started
+        print(f"[INFO] IK frame loop seconds: {self.frame_loop_seconds:.3f}")
         #clamp
         if temporal is None or not temporal.hard_velocity:
             for env in range(num_envs):

@@ -124,6 +124,38 @@ class BasePass:
             self._gpu_step()
 
 
+class ConstrainedRepairPass:
+    """Track post-pass FK targets inside the base pass's same-frame bounds.
+
+    Capture once: dispatching each projected IK iteration from Python would
+    otherwise dominate runtime even with all Warp kernels already compiled.
+    """
+
+    def __init__(self, ik_solver, joint_q, state, iterations):
+        self._ik_solver = ik_solver
+        self._joint_q = joint_q
+        self._state = state
+        self._iterations = iterations
+        if wp.get_device().is_cuda:
+            with wp.ScopedCapture() as capture:
+                self._gpu_step()
+            self._graph = capture.graph
+        else:
+            self._graph = None
+
+    def _gpu_step(self):
+        self._ik_solver.inherit_from_state(self._state)
+        self._ik_solver.sync_joint_q_from(self._joint_q)
+        self._ik_solver.solve(self._state, self._iterations)
+        wp.copy(self._joint_q, self._ik_solver.joint_q)
+
+    def execute(self, frame):
+        if self._graph is not None:
+            wp.capture_launch(self._graph)
+        else:
+            self._gpu_step()
+
+
 class PostProcessPass:
     """Limb stabiliser + foot-plant correction."""
 

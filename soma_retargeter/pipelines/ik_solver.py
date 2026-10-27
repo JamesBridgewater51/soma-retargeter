@@ -35,6 +35,23 @@ from soma_retargeter.pipelines.ik_objectives import (
     IKSmoothJointFilter
 )
 
+@wp.kernel
+def _position_targets_from_state(body_q: wp.array(dtype=wp.transform),
+                                 body_count: int, link_index: int, offset: wp.vec3,
+                                 targets: wp.array(dtype=wp.vec3)):
+    env = wp.tid()
+    targets[env] = wp.transform_point(body_q[env * body_count + link_index], offset)
+
+
+@wp.kernel
+def _rotation_targets_from_state(body_q: wp.array(dtype=wp.transform),
+                                 body_count: int, link_index: int, offset: wp.quat,
+                                 targets: wp.array(dtype=wp.vec4)):
+    env = wp.tid()
+    rotation = wp.mul(wp.transform_get_rotation(body_q[env * body_count + link_index]), offset)
+    targets[env] = wp.vec4(rotation[0], rotation[1], rotation[2], rotation[3])
+
+
 class IKSolver:
     """One IK solve pass: objectives, solver, and joint_q buffer.
 
@@ -174,16 +191,16 @@ class IKSolver:
         previous pass rather than the original retargeting targets.
         """
         body_count = self.ik_model.body_count
-        for env_idx in range(self.num_envs):
-            base = env_idx * body_count
-            for obj in self.position_objectives:
-                obj.set_target_position_from_transforms(
-                    env_idx, base + obj.link_index, state.body_q
-                )
-            for obj in self.rotation_objectives:
-                obj.set_target_rotation_from_transforms(
-                    env_idx, base + obj.link_index, state.body_q
-                )
+        for objective in self.position_objectives:
+            wp.launch(_position_targets_from_state, self.num_envs,
+                      inputs=[state.body_q, body_count, objective.link_index,
+                              objective.link_offset, objective.target_positions],
+                      device=self.model.device)
+        for objective in self.rotation_objectives:
+            wp.launch(_rotation_targets_from_state, self.num_envs,
+                      inputs=[state.body_q, body_count, objective.link_index,
+                              objective.link_offset_rotation, objective.target_rotations],
+                      device=self.model.device)
 
     def solve(
         self,
