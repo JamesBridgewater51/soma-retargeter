@@ -84,7 +84,8 @@ def bvh_metadata(path):
                 break
     if frames is None or frames < 1 or fps is None:
         raise ValueError(f"Missing BVH frames/FPS: {path}")
-    return {"frames": frames, "fps": fps}
+    # Native BVH loading quantizes sample rates to two decimals; retain the header timing too.
+    return {"frames": frames, "fps": round(fps, 2), "source_fps": fps, "source_frame_time": dt}
 
 
 def validate_csv(path, headers, frames):
@@ -305,6 +306,8 @@ def convert(source, output, config, metadata):
     from soma_retargeter.utils.space_conversion_utils import SpaceConverter, FacingDirectionType
     verified_module_path(sys.modules[SomaRetargetingPipeline.__module__])
     skeleton, animation = load_bvh(str(source))
+    if not math.isclose(float(animation.sample_rate), metadata["fps"], rel_tol=1e-8):
+        raise ValueError("Native BVH sample-rate rounding contract changed")
     pipeline = SomaRetargetingPipeline(skeleton, "soma", "agibot_x2ultra", retarget_config=config)
     transform = SpaceConverter(FacingDirectionType.MAYA).transform(wp.transform_identity())
     pipeline.add_input_motions([animation], [transform], scale_animation=True)

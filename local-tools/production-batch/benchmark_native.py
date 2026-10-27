@@ -48,11 +48,13 @@ def forward_case(request, settings):
                     raise ValueError("Wrong batch output count")
                 for buffer in buffers:
                     if (buffer.num_frames != metadata["frames"]
-                            or abs(float(buffer.sample_rate) - metadata["fps"]) > 1e-3
+                            or abs(float(buffer.sample_rate) - float(animation.sample_rate)) > 1e-6
                             or not np.isfinite(buffer.data).all()):
                         raise ValueError("Invalid fixed-pass benchmark output")
                 batch.verify_protected_files(settings)
                 return {"batch_size": len(buffers), "source_frames": metadata["frames"],
+                        "source_frame_time": metadata["source_frame_time"], "source_fps": metadata["source_fps"],
+                        "loaded_fps": float(animation.sample_rate),
                         "output_frames": metadata["frames"] * len(buffers),
                         "setup_seconds": ready - started, "execute_seconds": solved - ready,
                         "validated_total_seconds": time.monotonic() - started}

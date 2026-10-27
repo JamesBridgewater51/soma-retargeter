@@ -600,11 +600,31 @@ class Viewer:
             f"in {elapsed_str} "
             f"[{(elapsed_time/nb_retargeted_motions):.2f}s per motion]!")
 
+def _dispatch_production_batch():
+    import argparse
+    import sys
+
+    if not any(arg.split('=', 1)[0] == '--production-batch' for arg in sys.argv[1:]):
+        return
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument('--production-batch', choices=('singleton', 'batched'), required=True)
+    args, runner_args = parser.parse_known_args()
+    script_name = 'run_batch.py' if args.production_batch == 'singleton' else 'run_batched.py'
+    runner = pathlib.Path(__file__).resolve().parents[1] / 'local-tools' / 'production-batch' / script_name
+    if not runner.is_file():
+        raise FileNotFoundError(f'Production batch entrypoint not found: {runner}')
+    os.execv(sys.executable, [sys.executable, '-I', str(runner), *runner_args])
+
+
 def main():
+    _dispatch_production_batch()
     import newton.examples
 
     parser = newton.examples.create_parser()
     parser.set_defaults(viewer=("null"))
+    parser.add_argument(
+        '--production-batch', choices=('singleton', 'batched'),
+        help='Run independent per-sequence optimization and conversion; remaining arguments go to the production runner.')
     parser.add_argument(
         "--config",
         type=lambda x: None if x == "None" else str(x),

@@ -112,11 +112,15 @@ class BatchValidationTests(unittest.TestCase):
     def test_bvh_metadata_preserves_source_sample_rate_and_rejects_invalid_interval(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "motion.bvh"
-            for interval in ("0.008333333333333333", "0", "nan"):
+            for interval in ("0.008333333333333333", "0.008333", "0.033333", "0", "nan"):
                 with self.subTest(interval=interval):
                     source.write_text(f"HIERARCHY\nMOTION\n  Frames: 12\n\tFrame Time: {interval}\n")
-                    if interval.startswith("0.008"):
-                        self.assertEqual(BATCH.bvh_metadata(source), {"frames": 12, "fps": 120.0})
+                    if interval not in ("0", "nan"):
+                        metadata = BATCH.bvh_metadata(source)
+                        self.assertEqual(metadata["frames"], 12)
+                        self.assertEqual(metadata["fps"], round(1.0 / float(interval), 2))
+                        self.assertEqual(metadata["source_frame_time"], float(interval))
+                        self.assertEqual(metadata["source_fps"], 1.0 / float(interval))
                     else:
                         with self.assertRaises(ValueError):
                             BATCH.bvh_metadata(source)
