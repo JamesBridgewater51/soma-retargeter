@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
 
 from pathlib import Path
 from typing import Union, Dict
@@ -16,7 +17,10 @@ def get_package_root() -> Path:
 
 
 def get_assets_dir() -> Path:
-    """Return the assets directory path."""
+    """Return shared assets when STORAGE_ROOT is set, otherwise bundled assets."""
+    storage_root = os.environ.get('STORAGE_ROOT')
+    if storage_root:
+        return Path(storage_root) / 'assets' / 'soma-retargeter'
     return get_package_root() / 'assets'
 
 
