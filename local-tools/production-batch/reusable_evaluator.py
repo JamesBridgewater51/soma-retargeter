@@ -132,12 +132,15 @@ class ReusableBaseEvaluator:
         reset_done = time.monotonic()
         for frame in range(self.pipeline.max_frames):
             self.pass_.execute(frame)
+            if self.temporal is not None:
+                self.temporal.record(self.joint_q)
             if frame >= self.remove:
                 for env, output in enumerate(self.outputs):
                     if frame - self.remove < output.shape[0]:
                         wp.copy(output[frame - self.remove], self.joint_q[env])
-        for output in self.outputs:
-            self.pipeline.joint_limit_clamper.apply(output)
+        if self.temporal is None or not self.temporal.hard_velocity:
+            for output in self.outputs:
+                self.pipeline.joint_limit_clamper.apply(output)
         buffers = [CSVAnimationBuffer.create_from_raw_data(output.numpy().copy(), rate)
                    for output, rate in zip(self.outputs, self.pipeline.input_sample_rates, strict=True)]
         self.last_timings = {'reset_seconds': reset_done - started,
