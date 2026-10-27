@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 TOOLS = Path(__file__).resolve().parent
 REPO = TOOLS.parents[1]
@@ -103,7 +104,9 @@ def main():
     pipeline = SomaRetargetingPipeline(skeleton, 'soma', 'agibot_x2ultra', retarget_config=config)
     transform = SpaceConverter(FacingDirectionType.MAYA).transform(wp.transform_identity())
     pipeline.add_input_motions([animation], [transform], True)
+    started = time.perf_counter()
     final = pipeline.execute()[0]
+    pipeline_seconds = time.perf_counter() - started
     if not hasattr(pipeline, 'base_retargeted_motions') or not pipeline.base_retargeted_motions:
         raise RuntimeError('Native pre-post base capture is unavailable; do not silently substitute another solve')
     base = pipeline.base_retargeted_motions[0]
@@ -115,6 +118,8 @@ def main():
     record = {
         'motion': entry['name'], 'variant': args.variant, 'weight_set': args.weight_set,
         'frames': entry['frames'], 'fps': entry['fps'], 'temporal_config': temporal,
+        'pipeline_runtime_seconds': pipeline_seconds,
+        'pipeline_seconds_per_frame': pipeline_seconds / entry['frames'],
         'controlled_config_sha256': controlled_hash, 'input_sha256': file_hash(source),
         'urdf_sha256': file_hash(urdf_path), 'joint_names': names,
         'effector_names': list(config['ik_match_table']),
@@ -154,6 +159,12 @@ def export_measurements(pipeline, buffers, record, output_dir):
     }
     np.savez_compressed(output_dir / 'trajectories.npz', **trajectories, fps=record['fps'])
     csv_io.save_csv(str(output_dir / 'final.csv'), record['joint_names'], buffers['final'])
+    exported = np.loadtxt(output_dir / 'final.csv', delimiter=',', skiprows=1)
+    if exported.shape != (record['frames'], 38):
+        raise ValueError('Exported CSV shape does not match native trajectory')
+    csv_q = trajectories['final'].astype(np.float64, copy=True)
+    csv_q[:, 7:] = np.deg2rad(exported[:, 7:])
+    record['exported_csv_temporal'] = trajectory_metrics(csv_q, record['fps'], record['joint_names'], record['velocity_limits_rad_s'])
     with (output_dir / 'measurement.metrics.json').open('x') as stream:
         json.dump(record, stream, indent=2, allow_nan=False)
 

@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument('--python', default=sys.executable)
     parser.add_argument('--motions', nargs='+', required=True, help='Exact motion names or all')
     parser.add_argument('--weight-sets', nargs='+', choices=('default', 'optimized'), default=['optimized'])
-    parser.add_argument('--scales', nargs='+', type=float, default=[1.0, 4.0, 16.0])
+    parser.add_argument('--scales', nargs='+', type=float, default=[0.25, 1.0, 4.0])
     parser.add_argument('--variants', nargs='+', help='Restrict full confirmation to screened variant names plus baseline')
     parser.add_argument('--combined-weights', nargs=2, type=float, metavar=('SMOOTH', 'NEAR_LIMIT'),
         help='Add the asymmetric combination of independently screened family weights')

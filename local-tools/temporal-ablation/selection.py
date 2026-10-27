@@ -13,7 +13,8 @@ POLICY = {
     'rotation_absolute_tolerance_rad': 0.01,
     'per_clip_temporal_regression_tolerance': 0.05,
     'required_mean_jerk_rms_improvement': 0.05,
-    'hard_velocity_required_exceedance_samples_at_relative_tolerance_1e4': 0,
+    'hard_velocity_relative_tolerance': 1e-4,
+    'hard_velocity_required_exceedance_samples': 0,
 }
 
 
@@ -48,8 +49,11 @@ def compare(candidate, baseline, policy):
                     failures.append({'motion': name, 'metric': derivative + '.' + statistic, 'baseline': old, 'candidate': new})
                 if statistic == 'rms':
                     clip_ratios.append(ratio)
-        old = base['temporal']['velocity_limits']['exceedance_samples']
-        new = final['temporal']['velocity_limits']['exceedance_samples']
+        old = baseline[name]['exported_csv_temporal']['velocity_limits']['exceedance_samples_with_rounding_tolerance']
+        new = record['exported_csv_temporal']['velocity_limits']['exceedance_samples_with_rounding_tolerance']
+        if record['temporal_config']['temporal_ik'].get('hard_velocity', False) and new != 0:
+            failures.append({'motion': name, 'metric': 'hard_velocity_feasibility_with_rounding_tolerance',
+                'required': 0, 'candidate': new})
         if new > old:
             failures.append({'motion': name, 'metric': 'velocity_limit_exceedances', 'baseline': old, 'candidate': new})
         ratios.append(clip_ratios)

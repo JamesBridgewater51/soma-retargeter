@@ -34,6 +34,13 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(result['velocity_limits']['exceedance_samples'], 1)
         self.assertEqual(result['velocity_limits']['max_ratio'], 12)
 
+    def test_csv_rounding_tolerance_is_distinct_from_strict_exceedance(self):
+        q = np.zeros((8, 38))
+        q[:, 7:] = np.arange(8)[:, None] * 1.00005 / 120
+        limits = trajectory_metrics(q, 120, NAMES, np.ones(31))['velocity_limits']
+        self.assertEqual(limits['exceedance_samples'], 7 * 31)
+        self.assertEqual(limits['exceedance_samples_with_rounding_tolerance'], 0)
+
     def test_quaternion_sign_is_not_rotation_error(self):
         target = np.zeros((5, 2, 7))
         target[..., 6] = 1
@@ -55,8 +62,10 @@ class SelectionTests(unittest.TestCase):
         temporal = trajectory_metrics(q, 120, NAMES, np.full(31, 100))
         return {
             'weight_set': 'optimized', 'variant': variant, 'motion': 'clip',
+            'temporal_config': {'temporal_ik': {'enabled': variant != 'baseline', 'hard_velocity': False}},
             'controlled_config_sha256': 'fixed', 'input_sha256': 'same',
             'urdf_sha256': 'same-urdf', 'native_source_sha256': 'same-native',
+            'exported_csv_temporal': temporal,
             'final': {'tracking': {'position_rmse_m': 0.01, 'rotation_rmse_rad': 0.1,
                 'per_effector_position_rmse_m': [0.01, 0.01],
                 'per_effector_rotation_rmse_rad': [0.1, 0.1]}, 'temporal': temporal},
@@ -84,6 +93,17 @@ class SelectionTests(unittest.TestCase):
         candidate['controlled_config_sha256'] = 'changed'
         with self.assertRaises(ValueError):
             select([self.record('baseline'), candidate], ['clip'])
+
+    def test_hard_velocity_requires_zero_not_merely_fewer_violations(self):
+        baseline = self.record('baseline')
+        candidate = self.record('limits', 0.8)
+        baseline['exported_csv_temporal']['velocity_limits']['exceedance_samples_with_rounding_tolerance'] = 2
+        candidate['exported_csv_temporal']['velocity_limits']['exceedance_samples_with_rounding_tolerance'] = 1
+        candidate['temporal_config']['temporal_ik']['hard_velocity'] = True
+        result = select([baseline, candidate], ['clip'])
+        self.assertIsNone(result['weight_sets']['optimized']['selection'])
+        failures = result['weight_sets']['optimized']['candidates']['limits']['failures']
+        self.assertTrue(any(failure['metric'] == 'hard_velocity_feasibility_with_rounding_tolerance' for failure in failures))
 
     def test_no_improvement_does_not_force_winner(self):
         result = select([self.record('baseline'), self.record('same')], ['clip'])
