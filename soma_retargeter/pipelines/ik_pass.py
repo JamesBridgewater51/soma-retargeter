@@ -102,7 +102,15 @@ class BasePass:
         Args:
             frame: Current frame index into the input target buffer.
         """
-        if frame <= self._num_frames_to_remove:
+        temporal = getattr(self._ik_solver, 'temporal', None)
+        if temporal is not None:
+            if frame == self._num_frames_to_remove:
+                temporal.reset_history()
+            temporal.prepare()
+            # Warm start from the previous final pose, not the hidden base result.
+            self._ik_solver.joint_q.assign(temporal.previous)
+
+        if 0 < self._num_frames_to_remove and frame <= self._num_frames_to_remove:
             w = self._smooth_filter_weight * (frame / float(self._num_frames_to_remove))
             self._smooth_filter_obj.set_weight(w)
 

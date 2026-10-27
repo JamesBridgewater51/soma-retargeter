@@ -16,6 +16,7 @@ import soma_retargeter.pipelines.utils as pipeline_utils
 import soma_retargeter.robotics.robot_registry as robot_registry
 from soma_retargeter.pipelines.ik_solver import IKSolver, BaseIKSolver
 from soma_retargeter.pipelines.ik_pass import BasePass, PostProcessPass
+from soma_retargeter.pipelines.temporal_ik import TemporalIK
 
 from soma_retargeter.animation.skeleton import Skeleton, SkeletonInstance
 from soma_retargeter.animation.animation_buffer import AnimationBuffer
@@ -106,6 +107,9 @@ class SomaRetargetingPipeline:
         self.smooth_joint_filter_coord_masks = None
         self.smooth_joint_limit_offsets = [None, None]
         self.joint_limit_clamper = None
+        self.temporal_ik_config = retargeter_config.get('temporal_ik', {})
+        self.capture_base_motion = retargeter_config.get('capture_base_motion', False)
+        self.base_retargeted_motions = []
 
         self.robot_builder = pipeline_utils.create_robot_builder(robot_type)
         self.human_robot_scaler = HumanToRobotScaler(
@@ -229,6 +233,7 @@ class SomaRetargetingPipeline:
         self.contact_results    = []
         self.plant_subsegment_results = []
         self.plant_blenders     = []
+        self.base_retargeted_motions = []
 
     def _needs_contact_processing(self) -> bool:
         """Return True if contact and plant-subsegment processing should run this pass."""
@@ -400,6 +405,7 @@ class SomaRetargetingPipeline:
             List of ``CSVAnimationBuffer`` objects, one per input environment.
         """
         num_envs = len(self.input_targets)
+        self.base_retargeted_motions = []
         if num_envs == 0:
             self.retargeted_motions = []
             return
@@ -444,6 +450,20 @@ class SomaRetargetingPipeline:
         if self.smooth_joint_filter_weight > 0.0:
             extra_objectives.append(smooth_joint_filter_objective)
 
+        temporal = None
+        if self.temporal_ik_config.get('enabled', False):
+            asset_info = pipeline_utils.get_target_asset_path(self.target_type)
+            if self.temporal_ik_config.get('hard_velocity', False) and 'urdf_path' not in asset_info:
+                raise ValueError('Hard velocity limits require a URDF with explicit velocity limits')
+            temporal = TemporalIK(
+                self.ik_model, num_envs, self.input_sample_rates,
+                self.human_robot_scaler.reference_joint_q, self.temporal_ik_config,
+                asset_info.get('urdf_path'))
+            if temporal.weight > 0:
+                extra_objectives.append(temporal.objective)
+            if temporal.limit_weight > 0:
+                extra_objectives.append(temporal.limit_objective)
+
         num_frames_to_remove = self.num_initialization_frames + self.num_stabilization_frames
 
         base_ik_solver = BaseIKSolver(
@@ -452,6 +472,8 @@ class SomaRetargetingPipeline:
             rotation_objectives=rotation_objectives,
             extra_objectives=extra_objectives,
             reference_joint_q=self.human_robot_scaler.reference_joint_q)
+
+        base_ik_solver.temporal = temporal
 
         # shared joint_q written by every pass; all later passes hold a reference to this buffer
         joint_q = wp.clone(base_ik_solver.joint_q)
@@ -495,10 +517,27 @@ class SomaRetargetingPipeline:
             for env in range(num_envs)
         ]
 
+        base_q_frames_wp = [wp.empty_like(frames) for frames in joint_q_frames_wp] if self.capture_base_motion else []
+
         # main pass for every frame
         for frame in trange(self.max_frames, desc="[INFO] Retargeting Motions"):
-            for pass_ in passes:
+            for pass_index, pass_ in enumerate(passes):
                 pass_.execute(frame)
+                if pass_index == 0 and self.capture_base_motion and frame >= num_frames_to_remove:
+                    # Raw base solve, before limb/plant processing and export clamp.
+                    for env in range(num_envs):
+                        if frame < len(self.input_targets[env]):
+                            wp.copy(base_q_frames_wp[env][frame - num_frames_to_remove], joint_q[env])
+
+            if temporal is not None:
+                if temporal.hard_velocity and self.post_processing_enabled:
+                    # Preserve the post-pass intent in task space, then solve inside
+                    # the SAME frame's feasible box. Never export a naked clamp.
+                    base_ik_solver.inherit_from_state(state)
+                    base_ik_solver.sync_joint_q_from(joint_q)
+                    base_ik_solver.solve(state, self.ik_iterations)
+                    wp.copy(joint_q, base_ik_solver.joint_q)
+                temporal.record(joint_q)
 
             # record to joint_q_frames_wp buffer
             if frame >= num_frames_to_remove:
@@ -507,9 +546,14 @@ class SomaRetargetingPipeline:
                         continue
                     wp.copy(joint_q_frames_wp[env][frame - num_frames_to_remove], joint_q[env])
         #clamp
-        for env in range(num_envs):
-            self.joint_limit_clamper.apply(joint_q_frames_wp[env])
+        if temporal is None or not temporal.hard_velocity:
+            for env in range(num_envs):
+                self.joint_limit_clamper.apply(joint_q_frames_wp[env])
 
+        self.base_retargeted_motions = [
+            CSVAnimationBuffer.create_from_raw_data(frames.numpy().copy(), self.input_sample_rates[i])
+            for i, frames in enumerate(base_q_frames_wp)
+        ]
         return [CSVAnimationBuffer.create_from_raw_data(joint_q_frames_wp[i].numpy(), self.input_sample_rates[i])
             for i in range(num_envs)]
 

@@ -194,7 +194,11 @@ class IKSolver:
 
         Updates ``model.joint_q``, evaluates FK into *state*
         """
-        self.solver.step(self.joint_q, self.joint_q, iterations=iterations)
+        temporal = getattr(self, 'temporal', None)
+        if temporal is not None and temporal.hard_velocity:
+            temporal.solve(self.solver, self.joint_q, iterations)
+        else:
+            self.solver.step(self.joint_q, self.joint_q, iterations=iterations)
         wp.copy(self.model.joint_q, self.joint_q.flatten())
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, state)
 
