@@ -120,6 +120,10 @@ class ControlledConfigTests(unittest.TestCase):
         self.assertTrue(variants['limits-4']['temporal_ik']['hard_velocity'])
         self.assertEqual(variants['combined-4']['temporal_ik']['weight'], 4)
         self.assertTrue(variants['combined-4']['temporal_ik']['hard_velocity'])
+        self.assertEqual(variants['limits-4']['temporal_ik']['velocity_avoidance_weight'], 4)
+        self.assertEqual(variants['limits-4']['temporal_ik']['velocity_margin_fraction'], 0.2)
+        self.assertEqual(variants['limits-4']['temporal_ik']['limit_weight'], 0)
+        self.assertEqual(variants['smooth-4']['temporal_ik']['velocity_avoidance_weight'], 0)
 
     def test_only_tracking_weights_copy_from_existing_candidate(self):
         default = {'smooth_joint_filter_weight': 5.5, 'ik_match_table': {

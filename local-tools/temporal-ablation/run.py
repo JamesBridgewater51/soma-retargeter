@@ -42,7 +42,8 @@ def build_config(default, fixed, temporal):
     # Restrict override scope: no accidental tracking/outer/collision changes.
     if set(temporal) - {'temporal_ik'}:
         raise ValueError('Only temporal_ik overrides are allowed')
-    allowed = {'enabled', 'mode', 'weight', 'hard_velocity', 'velocity_scale', 'limit_margin', 'limit_weight'}
+    allowed = {'enabled', 'mode', 'weight', 'hard_velocity', 'velocity_scale', 'limit_margin', 'limit_weight',
+        'velocity_avoidance_weight', 'velocity_margin_fraction'}
     if not isinstance(temporal.get('temporal_ik'), dict) or set(temporal['temporal_ik']) - allowed:
         raise ValueError('Unknown or malformed temporal_ik configuration')
     config.update(copy.deepcopy(temporal))
