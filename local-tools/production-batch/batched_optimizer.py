@@ -78,6 +78,9 @@ class IndependentBatchOptimizer:
         self.skeleton, self.animations, self.names = skeleton, animations, names
         self.config = copy.deepcopy(settings["optimizer"])
         self.reuse_geometry = bool(settings.get("reuse_geometry", False))
+        self.snapshot_budgets = set(settings.get("snapshot_iterations", []))
+        self.parameter_snapshots = {}
+        self.snapshot_statistics = {}
         self.workspace = workspace
         self.ik = native.IkWeightUpdateConfig.from_config(self.config)
         self.line_search = native.LineSearchConfig.from_config(self.config)
@@ -239,6 +242,13 @@ class IndependentBatchOptimizer:
                 else:
                     state.done = True
 
+    def capture_prefix(self, budget):
+        self.parameter_snapshots[budget] = [native._build_retargeter_config(self.workspace, state.params)
+                                           for state in self.states]
+        self.snapshot_statistics[budget] = [{"effective_iterations": state.iterations, "probes": state.probes,
+                                            "accepted_iterations": state.accepts, "converged": state.done,
+                                            "metrics": finite_metrics(state.anchor.aggregate)} for state in self.states]
+
     def run(self):
         self.initialize()
         for iteration in range(int(self.config["outer_iterations"])):
@@ -246,8 +256,13 @@ class IndependentBatchOptimizer:
             if not active:
                 break
             self.outer_iteration(active)
+            if iteration + 1 in self.snapshot_budgets:
+                self.capture_prefix(iteration + 1)
             print(f"BATCH_OUTER iteration={iteration + 1} active={len(active)} "
                   f"converged={sum(state.done for state in self.states)}", flush=True)
+        for budget in self.snapshot_budgets:
+            if budget not in self.parameter_snapshots:
+                self.capture_prefix(budget)
         return [native._build_retargeter_config(self.workspace, state.params) for state in self.states]
 
     def summaries(self):

@@ -339,6 +339,6 @@ class LimbStabilizer:
     def _build_model(self, num_envs: int):
         builder = newton.ModelBuilder()
         for _ in range(num_envs):
-            builder.add_builder(self.robot_builder, xform=wp.transform_identity())
+            builder.add_world(self.robot_builder, xform=wp.transform_identity())
         builder.add_ground_plane()
         return builder.finalize()

@@ -128,6 +128,11 @@ def fit_missing(jobs, settings):
             "source_sha256": job["sha256"], "source": job["source"], "batch_wall_seconds": elapsed,
             "batch_clips": len(missing), "outer_iterations": settings["optimizer"]["outer_iterations"],
             "engine": settings["engine"]})
+    for budget, prefix_configs in optimizer.parameter_snapshots.items():
+        for index, (job, prefix_config) in enumerate(zip(missing, prefix_configs, strict=True)):
+            batch.atomic_json(product_paths(job, settings)["directory"] / "snapshots" / f"budget-{budget}.json",
+                              {"budget": budget, "source_sha256": job["sha256"], "retargeter_config": prefix_config,
+                               **optimizer.snapshot_statistics[budget][index]})
     timings = {"resume_scan_seconds": started - gate_started,
                "bvh_and_optimizer_setup_seconds": search_started - started,
                "search_seconds": searched - search_started,
@@ -248,6 +253,9 @@ def run(args):
     settings["reuse_geometry"] = args.reuse_geometry
     settings["fast_bvh"] = args.fast_bvh
     settings["final_batch_size"] = args.final_batch_size
+    settings["snapshot_iterations"] = [int(token) for token in args.snapshot_iterations.split(",") if token]
+    if any(budget < 1 or budget > settings["optimizer"]["outer_iterations"] for budget in settings["snapshot_iterations"]):
+        raise ValueError("Snapshot prefixes must be within the explicitly configured optimizer budget")
     for key, override in (("output", args.output_root), ("weights", args.weights_root),
                           ("logs", args.log_root), ("artifacts", args.artifact_root)):
         if override:
@@ -325,6 +333,7 @@ def parse_args():
     parser.add_argument("--length-bucket-frames", type=int, default=256)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
+    parser.add_argument("--snapshot-iterations", default="", help="Explicit native-search prefix budgets to retain for pilot quality comparisons")
     parser.add_argument("--retries", type=int, default=1)
     args = parser.parse_args()
     if (args.batch_size < 1 or args.final_batch_size < 1 or args.length_bucket_frames < 1 or args.limit < 0 or args.retries < 0
