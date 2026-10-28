@@ -9,13 +9,16 @@
 </head>
 <body>
 <header>
-<nav><a href="http://127.0.0.1:18765/soma-g1-x2-follow/">最近一次 11 段共享场景</a> · <a href="cleaning.html">实际数据清洗流程</a> · <a href="selection/challenge100-proposal.json" download>下载完整选片清单</a></nav>
+<nav><a href="http://127.0.0.1:18765/soma-g1-x2-follow/">最近一次 11 段共享场景</a> · <a href="cleaning.html">实际数据清洗流程</a> · <a href="selection/challenge100-proposal.json" download>冻结渲染输入清单</a> · <a href="selection/corrected-kinematic-metrics.json" download>修正的运动学指标</a> · <a href="selection/ranking-verification.json" download>选片排序复核</a> · <a href="selection/training-retention.json" download>训练清洗标注</a></nav>
 <h1>100 段挑战动作：SOMA · 官方 G1 · 生产 X2</h1>
+<p><strong>100 / 100 段完整视频已完成。</strong>逐段解码与最终输入／视频哈希核验通过，统一 1920×1080、30 FPS。<a href="parallel-render/media-audit.json">查看媒体验收记录</a>。</p>
+<p><a href="challenge100-videos.zip" download>下载全部 100 段视频、预览、清单和离线审阅网页（约 462 MB）</a> · <a href="challenge100-videos.zip.sha256">下载校验和</a></p>
 <p>每个视频都是同一三维场景：原生 SOMA 人体蒙皮网格、BONES-SEED 官方 G1 转换结果，以及本次逐片段优化的完整生产 X2 结果。不是三段视频拼接，也不使用我们自己的 G1 转换。</p>
 <p>共享同一地面、相机和源帧索引；仅保留上一版明确披露的整段固定水平分道。无竖直补偿、逐帧根轨迹对齐、动作缩放或相位拉伸。相机近景平滑跟随三个角色。</p>
 <p>这里回放的是重定向后的参考轨迹，不是训练后策略的仿真 rollout；渲染不使用动力学仿真来修正接触或掩盖姿态问题。</p>
 <aside><strong>物体和地形的边界：</strong>标签中的楼梯、梯子、箱体、家具等说明动作语义，不等于发布了对应场景网格。本页不虚构物体或台阶；相关视频仍以统一平地显示，不能仅因角色脚部高于这块平地就判为悬空失败。真实骑自行车和越野类别未获核实；仰卧蹬车练习不是骑行交互。</aside>
 <p>保留原 11 段，另按动作语义、运动学难度和类型覆盖扩展到 100 段，并避免靠镜像或换演员凑数。候选难度分数是启发式筛选依据，不是“全库唯一、严格最难前 100”的证明。训练清洗状态只作附注，未用于隐藏被剔除的难例。</p>
+<p class="subtle">指标版本说明：选片阶段曾发现根参考平移重复计入的问题，旧绝对足部基线已修正。随后对全部 506 个缓存候选重新计算并重放筛选：五项排序输入不受该常量平移影响，修正前后入选成员完全相同，新增／移除均为 0。请使用另附的修正指标和排序复核记录，不把观察到的足部基线当作真实地面。视频与相机始终使用原生加载及真实蒙皮边界，不依赖手工 FK；这些指标也不等于真实物体／地形接触标注。</p>
 </header>
 <section class="filters" aria-label="动作筛选">
 <label>搜索<input id="search" type="search" placeholder="动作名、物体、描述" autocomplete="off"></label>
