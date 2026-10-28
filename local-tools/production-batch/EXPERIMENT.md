@@ -47,3 +47,22 @@ Evidence: the PT artifact `temporal-adaptive-damping-comparison/aggregate-compar
 - The shared Python executable resolves into persistent storage. Launchers still explicitly prepend and verify their isolated source repository because the environment's editable installation otherwise selects the old repository.
 - Eight real filesystem/configuration tests pass on the shared runtime. Batched optimization also passes native B1/B2 accepted/rejected-update parity and mixed 1/2/3-frame full-post/export checks on CPU; GPU end-to-end throughput remains a separate launch gate.
 - The eleven disabled-temporal control CSVs reproduce all numerical values of the existing frozen optimized comparison outputs exactly. This checks backward compatibility, not temporal improvement.
+
+## Final execution outcome
+
+The complete conversion contains 142,220 sequences and 124,554,605 frames. The final producer exited successfully at 2026-10-28 01:10:49 UTC. Eight redundant main jobs were deliberately terminated only after verifying that all their remaining source IDs were already valid or covered by live helpers; no source gaps or unrelated-job stops were introduced. All production writers were quiescent before final acceptance.
+
+The 16-thread read-only full audit started at 01:12:34 UTC and returned COMPLETE with exit code zero at 01:18:28 UTC, taking 353.76 seconds. It freshly recomputed every CSV and optimized-configuration SHA256, checked source sizes/native headers and source/configuration/receipt bindings, confirmed consistent 38-column headers and complete coverage, and verified every velocity-validation attestation. Numeric finite/shape/velocity checks were performed during native export and are bound to the freshly rehashed CSV bytes; the final audit did not rerun IK or reparse every numeric row. There were zero velocity violations at relative tolerance 1e-4; the largest recorded velocity-to-limit ratio was 1.000002924716061, below the 1.0001 acceptance threshold.
+
+Canonical PT deliverables:
+
+- CSV directory: `/data/liuminghao/datasets/bones-seed/converted/agibot-x2ultra/per-sequence-optimized/`
+- Independent weights: `/data/liuminghao/optimizers/soma-retargeter/agibot-x2ultra/full-per-sequence/`
+- Full product manifest and audit: `/data/liuminghao/artifacts/soma-retargeter/x2-production/final-audit.json`
+- Full manifest SHA256: `d56de960e8ecc58548d2518ac990bf343ab544b20abf71920c060de15f6ca9fa`
+- Completion marker: `/data/liuminghao/artifacts/soma-retargeter/x2-production/COMPLETE.json`
+- Completion marker SHA256: `ed4a5a4f8d1b03aca04dfc91ed04837d4d9254cc1b9d42f7a40f998073665c00`
+
+Both JSON files have adjacent `.sha256` sidecars. The marker was published last, after its sidecar, at 01:19:41 UTC; the files and hashes were re-read and verified before notifying the downstream training owner. CSV timing is native 120 FPS, root translations are centimeters, and root Euler/31 actuator angles are degrees, in the native X2 MAYA/Newton export convention.
+
+The nine-hour deadline was missed: conversion alone took about 10 hours 52 minutes, and verified completion publication about 11 hours 1 minute. The marker records `deadline_met: false`. No reduction below the explicitly selected four-iteration search budget, default-weight substitution, collision-dynamics redesign, or outer-smoothness change was introduced to manufacture an on-time result.
