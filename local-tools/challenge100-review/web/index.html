@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>100 段挑战动作 · SOMA / 官方 G1 / 生产 X2</title>
+<link rel="stylesheet" href="review.css">
+<script src="review.js" defer></script>
+</head>
+<body>
+<header>
+<nav><a href="http://127.0.0.1:18765/soma-g1-x2-follow/">最近一次 11 段共享场景</a> · <a href="cleaning.html">实际数据清洗流程</a> · <a href="selection/challenge100-proposal.json" download>下载完整选片清单</a></nav>
+<h1>100 段挑战动作：SOMA · 官方 G1 · 生产 X2</h1>
+<p>每个视频都是同一三维场景：原生 SOMA 人体蒙皮网格、BONES-SEED 官方 G1 转换结果，以及本次逐片段优化的完整生产 X2 结果。不是三段视频拼接，也不使用我们自己的 G1 转换。</p>
+<p>共享同一地面、相机和源帧索引；仅保留上一版明确披露的整段固定水平分道。无竖直补偿、逐帧根轨迹对齐、动作缩放或相位拉伸。相机近景平滑跟随三个角色。</p>
+<p>这里回放的是重定向后的参考轨迹，不是训练后策略的仿真 rollout；渲染不使用动力学仿真来修正接触或掩盖姿态问题。</p>
+<aside><strong>物体和地形的边界：</strong>标签中的楼梯、梯子、箱体、家具等说明动作语义，不等于发布了对应场景网格。本页不虚构物体或台阶；相关视频仍以统一平地显示，不能仅因角色脚部高于这块平地就判为悬空失败。真实骑自行车和越野类别未获核实；仰卧蹬车练习不是骑行交互。</aside>
+<p>保留原 11 段，另按动作语义、运动学难度和类型覆盖扩展到 100 段，并避免靠镜像或换演员凑数。候选难度分数是启发式筛选依据，不是“全库唯一、严格最难前 100”的证明。训练清洗状态只作附注，未用于隐藏被剔除的难例。</p>
+</header>
+<section class="filters" aria-label="动作筛选">
+<label>搜索<input id="search" type="search" placeholder="动作名、物体、描述" autocomplete="off"></label>
+<label>挑战类型<select id="category"><option value="">全部类型</option></select></label>
+<label>训练清洗<select id="retention"><option value="">全部</option><option value="kept">保留</option><option value="rejected">剔除</option></select></label>
+<label class="checkbox"><input id="original" type="checkbox">仅原来的 11 段</label>
+</section>
+<p id="selection-status" role="status">正在读取选片清单……</p>
+<main id="motions"></main>
+<footer><p>视频以 1920×1080、30 FPS 编码；三个角色始终读取同一个源帧索引。展开动作后才加载视频，支持原生播放器全屏。每段的输入校验和、相机及分道显示变换见对应渲染记录。</p></footer>
+</body>
+</html>
