@@ -29,11 +29,31 @@ function checkedMotions(parsed) {
   return parsed;
 }
 
+async function fetchReviewJson(path) {
+  const response = await fetch(path, { cache: "no-store" });
+  if (!response.ok) throw new Error(`审阅数据加载失败：${path}，HTTP ${response.status}`);
+  return response.json();
+}
+
+async function motionsWithTraining() {
+  const [selection, retention] = await Promise.all([
+    fetchReviewJson("selection/challenge100-proposal.json"), fetchReviewJson("selection/training-retention.json")
+  ]);
+  const motions = checkedMotions(selection);
+  if (!retention || !retention.motions || retention.selected_count !== motions.length) throw new Error("清洗标注与选片清单不一致。");
+  for (const motion of motions) {
+    const decision = retention.motions[motion.filename];
+    if (!decision || typeof decision.keep !== "boolean" || typeof decision.reason !== "string") throw new Error("缺少有效的逐片段清洗标注。");
+    if (!decision.keep && !decision.reason) throw new Error("被剔除的片段缺少原因。");
+    motion.training_filter = decision;
+  }
+  return motions;
+}
+
 function trainingStatus(motion) {
   const filter = motion.training_filter;
-  if (!filter || typeof filter.keep !== "boolean") return { key: "unknown", text: "训练清洗状态未核对" };
   if (filter.keep) return { key: "kept", text: "训练保留" };
-  return { key: "rejected", text: `训练剔除：${filter.reason || "未注明原因"}` };
+  return { key: "rejected", text: `训练剔除：${filter.reason}` };
 }
 
 function activeFilters() {
@@ -96,6 +116,13 @@ function motionSummary(motion) {
   return summary;
 }
 
+function sceneWarnings(motion) {
+  const props = String(motion.content_props || "").trim();
+  const involvesScene = motion.bucket === "terrain" || motion.bucket === "object_interaction" || (props && props !== "0");
+  if (!involvesScene) return [];
+  return [reviewElement("p", "场景边界：物体／地形仅有动作语义，源场景几何未提供。视频显示统一平地，不能据此将踩高处或坐物体判为悬空失败。", "motion-context")];
+}
+
 function motionCard(motion) {
   const card = reviewElement("details");
   card.id = motion.filename;
@@ -104,7 +131,7 @@ function motionCard(motion) {
   const description = motion.content_short_description || motion.content_technical_description || motion.family;
   const context = `${motion.frames} 个源帧 · ${motion.fps} Hz · 端点跨度 ${seconds} s · 官方类别：${motion.category || "未注明"} · 道具标签：${motion.content_props || "未注明"}`;
   card.append(motionSummary(motion), reviewElement("p", description, "motion-description"),
-    reviewElement("p", context, "motion-context"), motionVideo(motion, card), motionLinks(motion));
+    reviewElement("p", context, "motion-context"), ...sceneWarnings(motion), motionVideo(motion, card), motionLinks(motion));
   return card;
 }
 
@@ -130,9 +157,7 @@ function populateCategories() {
 }
 
 async function initializeReview() {
-  const response = await fetch("selection/challenge100-proposal.json", { cache: "no-store" });
-  if (!response.ok) throw new Error(`选片清单加载失败：HTTP ${response.status}`);
-  reviewMotions = checkedMotions(await response.json());
+  reviewMotions = await motionsWithTraining();
   document.getElementById("motions").append(...reviewMotions.map(motionCard));
   populateCategories();
   for (const control of Object.values(controls)) control.addEventListener("input", updateVisibility);

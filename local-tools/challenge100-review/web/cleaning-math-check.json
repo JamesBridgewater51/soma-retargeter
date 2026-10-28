@@ -1,0 +1,35 @@
+{
+  "scope": "Read-only synthetic geometric check, not an end-to-end floating-filter decision or a full-dataset counterfactual",
+  "source_fix_commit_reported_by_maintainer": "d534d6e",
+  "fixed_pt_source_sha256_verified": "5c56ca01aa363bcddfebf511c142b25e4f8804123b18e4feeb7dfd41ee8b5689",
+  "existing_training_manifest_rebuilt": false,
+  "robot": "x2",
+  "actuated_joints": 31,
+  "non_world_bodies": 38,
+  "synthetic_root_euler_xyz_deg": [20, 35, 40],
+  "method": "Enumerate all eight actual MuJoCo box corners, transform with geom_xmat local-to-world, and compare the minimum world z with the executed filter formula",
+  "current_filter_z_m_label": "Values from the old executed column-projection formula at check time, not the subsequently fixed source",
+  "results": [
+    {
+      "geom": "left_ankle_roll_link_sole_collision",
+      "half_sizes_m": [0.052987, 0.0645213, 0.0274207],
+      "corner_min_z_m": 0.9425452698842611,
+      "current_filter_z_m": 0.9520385751734765,
+      "correct_projection_z_m": 0.9425452698842611,
+      "current_abs_error_m": 0.009493305289215326,
+      "correct_abs_error_m": 0.0
+    },
+    {
+      "geom": "right_ankle_roll_link_sole_collision",
+      "half_sizes_m": [0.0529973, 0.0645213, 0.0274199],
+      "corner_min_z_m": 0.8656593126889373,
+      "current_filter_z_m": 0.8751520086635711,
+      "correct_projection_z_m": 0.8656593126889373,
+      "current_abs_error_m": 0.009492695974633869,
+      "correct_abs_error_m": 0.0
+    }
+  ],
+  "files_changed": false,
+  "training_changed": false,
+  "full_filter_rerun": false
+}

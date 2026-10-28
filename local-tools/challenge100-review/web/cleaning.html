@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SuperMimic X2：本次实际数据清洗流程</title><link rel="stylesheet" href="review.css"></head>
+<body><article>
+<nav><a href="index.html">返回 100 段挑战审阅</a> · <a href="cleaning-math-check.json">脚底盒子公式的只读复核证据</a></nav>
+<h1>SuperMimic X2：这次实际如何过滤与“清洗”</h1>
+<p>本页核对的是本次实际训练管线，而不是只概括论文：已读取启动脚本、实际运行源码、全量转换与过滤清单、NPZ 样本、保存的训练配置及四进程训练日志。原生重定向导出验证与下游训练筛选是两个不同阶段。</p>
+<aside><strong>先说结论：</strong>这里的“清洗”主要是<strong>格式转换、重采样和整段剔除</strong>，不是重新求 IK、修复碰撞或平滑动作。总共剔除 12,915 段，其中 12,573 段按名字拒绝，只有 342 段进入几何规则后被拒绝。名字拒绝占全部剔除的约 97.35%；被剔除并不等于重定向失败。</aside>
+<h2>1. 实际执行链与数量</h2>
+<p>执行链：120 Hz X2 CSV → 50 Hz NPZ 与 X2 正向运动学 → 名字过滤 → 几何过滤 → 读取保留清单 → FP16 compact library → 训练加载。</p>
+<table><thead><tr><th>阶段</th><th>片段数</th><th>50 Hz 帧数</th><th>按总帧数 ÷ 50 的小时数</th></tr></thead><tbody>
+<tr><td>转换后全量 NPZ</td><td>142,220</td><td>51,915,358</td><td>288.418656 h</td></tr>
+<tr><td>名字过滤拒绝</td><td>12,573</td><td>4,336,999</td><td>24.094439 h</td></tr>
+<tr><td>名字过滤后剩余</td><td>129,647</td><td>47,578,359</td><td>264.324217 h</td></tr>
+<tr><td>几何过滤拒绝</td><td>342</td><td>277,914</td><td>1.543967 h</td></tr>
+<tr><td><strong>进入训练 compact</strong></td><td><strong>129,305</strong></td><td><strong>47,300,445</strong></td><td><strong>262.780250 h</strong></td></tr>
+</tbody></table>
+<p>这不是重定向阶段删除了 12,915 个 CSV。全部生产 CSV 仍被保留；下游在 <code>manifest_filtered.csv</code> 中给每段写入 <code>keep</code> 和 <code>reason</code>，建库时只读取 <code>keep=1</code> 的 NPZ。</p>
+<p class="subtle">实际入口：<code>/data/liuminghao/supermimic/jobs/x2_full_train.sh:19–30</code>，转换参数为 <code>--input-fps 120 --output-fps 50 --workers 48 --robot x2</code>，过滤也使用 <code>--robot x2</code>。实际训练日志 <code>/data/liuminghao/logs/supermimic/x2_bones_full_4gpu_stdout.log:449–452</code> 四个 rank 均确认加载 129,305 clips、47,300,445 frames、262.780 h、1,009,921 bins 和约 7.10 GB 的库。</p>
+<h2>2. CSV → NPZ 改变了什么</h2>
+<h3>单位、列与旋转表示</h3>
+<ul><li>根平移从厘米变为米；根 Euler XYZ 与关节角从度转换到四元数／弧度。</li><li>关节按名字找列，兼容官方 G1 的 <code>_dof</code> 后缀与本次 X2 的裸关节名，不依赖 CSV 物理列顺序。</li><li>CSV 读取后根四元数暂用 xyzw；进入 MuJoCo 和 NPZ 时变为 wxyz。</li><li>这一转换路径没有额外交换坐标轴、翻转轴、统一朝向、重置根轨迹或把动作整体向下落地。审阅页给官方 G1 的显示坐标变换，不属于这条 X2 训练数据转换链。</li></ul>
+<p class="subtle">实现：<code>repo-x2/src/supermimic/data/motion_convert.py:150–189</code>。</p>
+<h3>120 Hz → 50 Hz：插值，不是额外平滑优化</h3>
+<p>先以 <code>(输入帧数−1)/120</code> 定义输入端点跨度，再在 20 ms 均匀网格取样。输出点不超出原跨度；若最后端点恰好落在网格上，保留该端点。根位置和关节角在线性邻帧间插值；根四元数使用短路径 SLERP，接近重合时线性混合后归一化。</p>
+<p>随后在重采样后的信号上计算速度：根线速度与关节速度用 0.02 s 步长的差分；根角速度用 SO(3) 姿态差分。没有另加抗混叠低通、Butterworth、Savitzky–Golay、关节速度投影或角度限幅；因此不能把这一步称作“专门去抖清洗”。</p>
+<p class="subtle">实现：<code>motion_convert.py:192–245</code>。</p>
+<h3>通过 X2 模型生成 body 状态</h3>
+<p>每帧把根姿态与 31 个关节角放入 X2 MuJoCo 模型，执行运动学及速度计算，生成 <strong>38 个非 world body</strong> 的世界位姿和速度。自由根的线速度使用世界坐标，角速度先转为 body frame 再填入 MuJoCo 的 qvel。这里不推进接触动力学，不施加地面反力，不重新优化动作。</p>
+<p class="subtle">实现：<code>motion_convert.py:271–307</code>。源码部分旧注释仍写 30 bodies，那是 G1 遗留说明，不是这次 X2 的实际维数。</p>
+<h2>3. 第一关：按动作名字整段拒绝</h2>
+<p>实际代码将名字转小写，然后对<strong>按字母排序的 47 个关键词做子串匹配</strong>；第一个命中就返回 <code>name:关键词</code>。这不是根据画面识别物体，也不是查询结构化场景标签。即使注释提到下划线，实际实现也不是带词边界的正则。</p>
+<p>主要涉及家具／外部支撑、攀爬与高差障碍，以及部分杂技。坐姿并非全部被删：名字含 <code>sitting</code> 或 <code>sit_</code> 的会触发，但只在描述里提到坐姿、名字未命中的动作不一定触发。</p>
+<table><thead><tr><th>首次命中的名字原因</th><th>本次拒绝数</th></tr></thead><tbody>
+<tr><td>sitting</td><td>3,719</td></tr><tr><td>50cm_box_</td><td>3,402</td></tr><tr><td>sit_</td><td>1,576</td></tr><tr><td>crutch</td><td>930</td></tr><tr><td>chair</td><td>686</td></tr><tr><td>table</td><td>646</td></tr><tr><td>handstand</td><td>162</td></tr><tr><td>cartwheel</td><td>120</td></tr><tr><td>stair / ladder</td><td>70 / 48</td></tr>
+</tbody></table>
+<p>这些数是<strong>顺序首次归因</strong>，不是各语义类别在全库的独立总量。例如，一个既有箱体又有楼梯语义的动作只记录第一个命中原因。</p>
+<details><summary>查看全部 47 个实际关键词</summary><p><code>230m, 50cm_box_, _bed_, _box_, _ride_, _sit_, _stair, acrobatics_, bed, bike, box_, box_dips, box_hspu, box_jump, cartwheel, chair, climb, com_up_50cm, crutch, fall_from, fence, form_box, handstand, handstand_ff_, jump_off_50cm, jump_over_obstacle_, jump_to_shoulder_roll, kozak_dance, ladder, lift_crate_come_up_, look_over, monkey_jump, off_1m, off_50cm, on_1m, on_box, push_obstacle, safety_roll, scooter, seat, sit_, sitting, stair, step_on, stepdown, table, walking_on_edge</code></p></details>
+<p>这份列表由复现仓库的 SONIC 关键词、补充杂技词与论文示例相关项组合而来，代码注释也记录了为了对齐复现统计而调整列表的历史。不能仅凭保留数量接近论文，宣称逐条规则与官方处理完全一致。</p>
+<p class="subtle">实现：<code>repo-x2/scripts/data/filter_bones_seed.py:19–56</code>。</p>
+<h2>4. 第二关：三项几何规则，按顺序早退</h2>
+<p>只有通过名字过滤的动作才进入这一关。顺序是 <strong>elevated → penetration → floating</strong>；只记录第一个失败原因。任何一项失败都是<strong>整段剔除</strong>，没有裁掉几个坏帧再保留剩余部分。</p>
+<h3>4.1 长时间整体离地：102 段</h3>
+<p>逐帧取所有 body 坐标原点的最低世界 Z。如果该最低值连续至少 <strong>30 帧</strong>大于 <strong>0.20 m</strong>，拒绝为 elevated_support。在 50 Hz 下按帧数口径约为 0.6 s。</p>
+<p>这是一项高度启发式，不是找到了真实的椅子或台阶，也不是逐三角面接触检测。它可能拒绝某些持续腾空的动作；不能据此认定动作的 IK 目标不可达。</p>
+<h3>4.2 深度穿地：220 段</h3>
+<ul><li>任一帧的最低 body 原点 Z <strong>小于 −0.12 m</strong>；或者</li><li>最低 body 原点 Z <strong>小于 −0.08 m</strong>的帧占比<strong>超过 80%</strong>。</li></ul>
+<p>这里使用的是 body 坐标原点，而不是所有身体 mesh 的最低表面，所以不是完整的全身防穿地检测。</p>
+<h3>4.3 准静态站立时双脚悬空：20 段</h3>
+<p>先找同时满足以下条件的帧：</p>
+<ul><li>骨盆基本直立：骨盆上轴与世界上方向的点积大于 0.9；</li><li>X2 骨盆高度严格位于 <strong>0.70–0.97 m</strong>；</li><li>骨盆线速度模长小于 <strong>0.1 m/s</strong>；</li><li>所有关节速度的均方根小于 <strong>0.5 rad/s</strong>，不是要求每个关节都小于这个值。</li></ul>
+<p>若这样的门控连续至少 25 帧，才计算两只脚碰撞几何的最低点；当仍满足门控、且<strong>两足整体的最低点高于 0.02 m</strong>连续至少 25 帧时，拒绝为 floating_feet。单脚摆动不等于两足都悬空。</p>
+<p><strong>0.70–0.97 m 只是这项悬空检查的门控，不是“所有非站立姿态都拒绝”。</strong>这也是为什么部分没有命中名字黑名单的低位、坐姿和地面动作仍可保留。G1 对应骨盆门控是 0.60–0.85 m；本次显式选择 X2 模型和 X2 脚底碰撞几何，其余这些阈值与名字规则沿用同一脚本。</p>
+<p class="subtle">阈值与顺序：<code>filter_bones_seed.py:33–88,155–180</code>；脚底几何：<code>:95–144</code>。三种拒绝计数不是所有违规情况的独立计数。</p>
+<h2>5. 已确认的脚底盒子公式问题：与现有训练数据版本分开报告</h2>
+<p>X2 的实际脚底碰撞体是 box。本次生成训练过滤清单时使用的版本，用旋转矩阵第三列的前两个元素乘局部 X/Y 半尺寸；对于 MuJoCo 的局部到世界旋转，求世界 Z 范围应使用<strong>第三行</strong>。发现问题后，维护者在 SuperMimic 适配分支 <code>d534d6e</code> 修复了源码；我已再次直接读取 PT 执行路径，确认现在第 139 行采用第三行公式。<strong>现有过滤清单、compact 与训练没有重建</strong>，所以本页的数量和保留标注仍描述原先实际生成的数据版本。源码修复已部署与训练数据已重新筛选是两个问题。</p>
+<p>我用实际 X2 两个脚底 box 的尺寸和一个非平凡合成旋转，枚举全部 8 个角点做了只读复核：正确投影与角点最小 Z 完全一致，执行时旧公式在该例中误差约 <strong>9.49 mm</strong>。<a href="cleaning-math-check.json">查看完整数值证据</a>。</p>
+<p><code>正确的世界最低点 = 中心 Z − |R[z,x]|·半长 X − |R[z,y]|·半长 Y − |R[z,z]|·半长 Z</code></p>
+<aside>这证明的是几何辅助函数存在公式问题，<strong>不是</strong>证明这个合成姿态通过了整套 floating 门控，也不是证明本次 20 个 floating 拒绝都错。尚未做全库修正前后反事实比较，无法报告准确受影响数；通过的动作也可能受判定偏差影响。原 CSV 的导出校验与这个下游筛选问题是两回事。现有训练清单、compact 和训练作业保持不变；即使源码修复部署完成，也不能理解为这些训练数据已经按新公式重新筛选。</aside>
+<p class="subtle">执行时旧公式位置：<code>filter_bones_seed.py:127–130</code>；后续源码修复为 <code>d534d6e</code>，现有 manifest 未重跑。</p>
+<h2>6. compact 到底怎么打包</h2>
+<p>建库程序读取 <code>manifest_filtered.csv</code>，只包含 keep=1 的文件。每帧拼接骨盆位置 3、四元数 4、关节角 31、骨盆线速度 3、角速度 3、关节速度 31，共 <strong>75 维</strong>，转成 FP16。旧 docstring 的“71 维”对应 29 关节 G1，不能用于这次 X2。</p>
+<p>保存一个大 tensor，并用 names、starts、lengths 保存每条动作的边界。存储上拼在一起不等于把不同动作连成一条运动；训练库仍按片段边界访问。日志中的 1,009,921 bins 是片段内部的采样索引格，不是又合成了这么多新动作文件。</p>
+<p>compact 省略了全量 NPZ 中冗余的所有 body 状态，需要时再用 X2 模型做 FK。FP16 是数值压缩，不是平滑或动力学修复。本次磁盘文件实际为 <strong>7,101,632,362 字节，即 7.1016 GB / 6.614 GiB</strong>；此前“6.94 GB”的说法不准确，实际训练日志也报告约 7.10 GB。</p>
+<p class="subtle">打包：<code>repo-x2/scripts/data/build_library.py:18–38</code>；清单选择与采样边界：<code>repo-x2/src/supermimic/envs/mdp/motion_library.py:160–180,268–283</code>。</p>
+<h2>7. 为什么 262.78 小时与 262.06 小时都出现了</h2>
+<p>训练日志与过滤汇总采用每段 <code>N/50</code> 秒，总计 <strong>262.780250 h</strong>；转换 manifest 的 duration_s 则采用每段采样端点跨度 <code>(N−1)/50</code> 秒，总计 <strong>262.0618889 h</strong>。</p>
+<p>两者相差 <strong>0.7183611 h</strong>，正好是 129,305 段各自一个 20 ms 间隔的累计差。不是额外丢失了约 0.72 小时动作；报告时必须说清采用哪个口径。</p>
+<h2>8. 这套“清洗”没有保证什么</h2>
+<ul><li>没有重求 IK、接触动力学修复、自碰撞修复、力矩或摩擦可行性验证。</li><li>没有以参考跟踪误差、jerk 或“罕见动作程度”作为上述几何过滤的优化目标。</li><li>没有逐帧修补、局部裁剪、额外镜像增强、动作拼接、统一朝向或额外落地平移。</li><li>名字筛选和粗高度规则都不等于完整质量评测。保留条数与论文接近，只说明规模接近，不能推出重定向质量等同。</li><li>启动脚本会复用已有 manifest/library；部分 NPZ 也经历幂等复用。已核验实际清单、样本与加载日志，但 compact 不保存每条源 CSV 的哈希，所以不能声称所有训练数值都已逐项绑定生产 CSV 的密码学来源。</li></ul>
+<p>因此，本次 100 段可视化始终从<strong>全部生产重定向结果</strong>挑选，并附上训练是否保留／首次拒绝原因。这样既能审查真正困难的转换，也能看到训练过滤策略排除了哪些能力，而不是把排除的动作藏起来。</p>
+<p class="subtle">审计针对 2026-10-28 本次实际执行版本，源码行号也按该版本记录，后续修复可能导致偏移。过滤 manifest SHA256 为 <code>79173bbff66004ff1c08f82a3aec645f431106c1fa737ef8684a3740c61f4061</code>。现有训练数据与任务未被本次解释或可视化修改。</p>
+</article></body></html>
